@@ -1,0 +1,53 @@
+# ============================================================
+#  Gaussian Splatting - .gitignore
+#  Large binaries and generated files excluded from repo.
+#  See README.txt for what needs to be downloaded separately.
+# ============================================================
+
+# Portable Python runtime (~50MB)
+Python/
+
+# Bundled COLMAP binary + DLLs (~200MB)
+COLMAP/bin/
+COLMAP/lib/
+
+# Bundled Brush trainer (~200MB)
+Brush/
+
+# Pre-downloaded pip wheels (~150MB) - reproducible via pip
+App/wheels/
+
+# WebXR controller profiles (~100MB) - binary assets
+App/static/supersplat/webxr-profiles/
+
+# PlayCanvas SuperSplat viewer JS bundle (2.4MB, downloaded from npm)
+# Download from: https://unpkg.com/@playcanvas/supersplat-viewer@1.15.0/public/index.js
+App/static/supersplat/index.js
+
+# Job processing output (auto-created at runtime)
+App/processing/
+App/uploads/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Brush autotune cache
+App/target/
+
+# First-run dependency marker
+App/.deps_installed
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Windows CMD redirect artifact
+nul
+
+# Log files
+*.log

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Logs - SIMPLE SPLAT CREATOR v1.0</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Mono', 'Monaco', 'Courier New', monospace;
+            background: #0d0d0d;
+            color: #32d74b;
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .header {
+            background: rgba(30, 30, 30, 0.8);
+            backdrop-filter: saturate(180%) blur(20px);
+            padding: 20px 40px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header h1 {
+            font-size: 1.5em;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #f5f5f7;
+        }
+
+        .header-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .header button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+
+        .btn-clear {
+            background: #ff453a;
+            color: white;
+        }
+
+        .btn-back {
+            background: #2a2a2a;
+            color: #f5f5f7;
+        }
+
+        .btn-scroll {
+            background: #32d74b;
+            color: white;
+        }
+
+        .header button:hover {
+            transform: translateY(-1px);
+        }
+
+        .btn-clear:hover {
+            background: #ff5e54;
+        }
+
+        .btn-back:hover {
+            background: #3a3a3a;
+        }
+
+        .btn-scroll:hover {
+            background: #3fe058;
+        }
+
+        .terminal {
+            padding: 20px;
+            padding-bottom: 150px;  /* Extra space so last lines aren't covered by status bar */
+            min-height: calc(100vh - 60px);
+        }
+
+        .log-entry {
+            padding: 3px 0;
+            font-size: 0.9em;
+            line-height: 1.4;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .log-entry:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .log-INFO {
+            color: #32d74b;
+        }
+
+        .log-ERROR {
+            color: #ff453a;
+        }
+
+        .log-WARNING {
+            color: #ff9f0a;
+        }
+
+        .log-DEBUG {
+            color: #6e6e73;
+        }
+
+        .timestamp {
+            color: #6e6e73;
+        }
+
+        .level {
+            font-weight: 600;
+        }
+
+        .status-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(30, 30, 30, 0.8);
+            backdrop-filter: saturate(180%) blur(20px);
+            padding: 12px 40px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.9em;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #f5f5f7;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #32d74b;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .log-count {
+            color: #a0a0a0;
+            font-family: 'SF Mono', monospace;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 50px;
+            color: #6e6e73;
+            font-size: 0.95em;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📟 Live Terminal Logs</h1>
+        <div class="header-buttons">
+            <button class="btn-scroll" onclick="scrollToBottom()">⬇️ Scroll to Bottom</button>
+            <button class="btn-clear" onclick="clearLogs()">🗑️ Clear Logs</button>
+            <button class="btn-back" onclick="window.location.href='/'">← Back to App</button>
+        </div>
+    </div>
+
+    <div class="terminal" id="terminal">
+        <div class="empty-state" id="emptyState">
+            Waiting for logs... Upload some images to see processing logs here.
+        </div>
+    </div>
+
+    <div class="status-bar">
+        <div class="status-indicator">
+            <div class="status-dot"></div>
+            <span>Connected - Live streaming</span>
+        </div>
+        <div class="log-count" id="logCount">0 log entries</div>
+    </div>
+
+    <script>
+        const terminal = document.getElementById('terminal');
+        const emptyState = document.getElementById('emptyState');
+        const logCount = document.getElementById('logCount');
+        let autoScroll = true;
+        let entryCount = 0;
+
+        // Load existing logs first
+        async function loadExistingLogs() {
+            try {
+                const response = await fetch('/logs/current');
+                const data = await response.json();
+                if (data.logs && data.logs.length > 0) {
+                    emptyState.style.display = 'none';
+                    data.logs.forEach(log => addLogEntry(log));
+                }
+            } catch (error) {
+                console.error('Error loading logs:', error);
+            }
+        }
+
+        // Connect to SSE stream
+        function connectStream() {
+            const eventSource = new EventSource('/logs/stream');
+            
+            eventSource.onmessage = function(event) {
+                emptyState.style.display = 'none';
+                addLogEntry(event.data);
+            };
+            
+            eventSource.onerror = function(error) {
+                console.error('SSE Error:', error);
+                // Reconnect after 2 seconds
+                setTimeout(connectStream, 2000);
+            };
+        }
+
+        function addLogEntry(logText) {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            
+            // Parse and colorize the log
+            let colorClass = 'log-INFO';
+            if (logText.includes('[ERROR]')) colorClass = 'log-ERROR';
+            else if (logText.includes('[WARNING]')) colorClass = 'log-WARNING';
+            else if (logText.includes('[DEBUG]')) colorClass = 'log-DEBUG';
+            
+            entry.classList.add(colorClass);
+            entry.textContent = logText;
+            
+            terminal.appendChild(entry);
+            entryCount++;
+            logCount.textContent = `${entryCount} log entries`;
+            
+            if (autoScroll) {
+                scrollToBottom();
+            }
+        }
+
+        function scrollToBottom() {
+            window.scrollTo(0, document.body.scrollHeight);
+        }
+
+        async function clearLogs() {
+            if (!confirm('Clear all logs?')) return;
+            
+            try {
+                await fetch('/logs/clear', { method: 'POST' });
+                terminal.innerHTML = '<div class="empty-state" id="emptyState">Logs cleared. Waiting for new logs...</div>';
+                entryCount = 0;
+                logCount.textContent = '0 log entries';
+            } catch (error) {
+                alert('Error clearing logs: ' + error);
+            }
+        }
+
+        // Detect manual scroll to disable auto-scroll
+        window.addEventListener('scroll', function() {
+            const isAtBottom = (window.innerHeight + window.scrollY) >= document.body.scrollHeight - 100;
+            autoScroll = isAtBottom;
+        });
+
+        // Initialize
+        loadExistingLogs();
+        connectStream();
+    </script>
+</body>
+</html>
+

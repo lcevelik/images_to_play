@@ -1,0 +1,1332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SIMPLE SPLAT CREATOR v1.0</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+            background: #0d0d0d;
+            height: 100vh;
+            overflow: hidden;
+            color: #f5f5f7;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .app-container {
+            height: 100vh;
+            display: grid;
+            grid-template-rows: auto 1fr;
+            gap: 0;
+        }
+
+        /* Header - Apple style */
+        .header {
+            background: rgba(30, 30, 30, 0.8);
+            backdrop-filter: saturate(180%) blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.75em;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #f5f5f7;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .header-btn {
+            padding: 8px 16px;
+            background: #2a2a2a;
+            border: none;
+            border-radius: 8px;
+            color: #f5f5f7;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            display: inline-block;
+            font-weight: 500;
+        }
+
+        .header-btn:hover {
+            background: #3a3a3a;
+            transform: translateY(-1px);
+        }
+
+        /* Main Content - 3 Column Grid */
+        .main-content {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr 1fr;
+            gap: 20px;
+            padding: 20px 40px;
+            overflow: hidden;
+            height: calc(100vh - 80px);
+        }
+
+        .panel {
+            background: #1a1a1a;
+            border-radius: 16px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            box-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .panel::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .panel::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .panel::-webkit-scrollbar-thumb {
+            background: #3a3a3a;
+            border-radius: 4px;
+        }
+
+        .panel::-webkit-scrollbar-thumb:hover {
+            background: #4a4a4a;
+        }
+
+        .panel-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #f5f5f7;
+            letter-spacing: -0.02em;
+        }
+
+        .section-title {
+            font-size: 1.1em;
+            font-weight: 600;
+            margin: 24px 0 16px 0;
+            color: #f5f5f7;
+            letter-spacing: -0.01em;
+        }
+
+        /* Upload Section - Apple style */
+        .upload-zone {
+            border: 2px dashed #3a3a3a;
+            border-radius: 12px;
+            padding: 32px;
+            text-align: center;
+            background: #161616;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #0071e3;
+            background: rgba(0, 113, 227, 0.1);
+        }
+
+        .upload-icon {
+            font-size: 3em;
+            margin-bottom: 16px;
+        }
+
+        .upload-btn {
+            background: #0071e3;
+            color: white;
+            padding: 12px 28px;
+            border: none;
+            border-radius: 10px;
+            font-size: 0.95em;
+            font-weight: 500;
+            cursor: pointer;
+            margin-top: 16px;
+            transition: all 0.2s ease;
+        }
+
+        .upload-btn:hover {
+            background: #0077ed;
+            transform: translateY(-1px);
+        }
+
+        .file-list {
+            margin-top: 16px;
+            font-size: 0.9em;
+        }
+
+        .file-item {
+            padding: 12px;
+            background: #2a2a2a;
+            margin: 8px 0;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: #f5f5f7;
+        }
+
+        /* Settings - Apple radio buttons */
+        .preset-option {
+            cursor: pointer;
+            padding: 16px;
+            border-radius: 10px;
+            border: 2px solid #3a3a3a;
+            background: #161616;
+            margin-bottom: 12px;
+            transition: all 0.2s ease;
+            display: block;
+            color: #f5f5f7;
+        }
+
+        .preset-option:hover {
+            border-color: #0071e3;
+        }
+
+        .preset-option:has(input:checked) {
+            border-color: #0071e3;
+            background: rgba(0, 113, 227, 0.15);
+        }
+
+        .preset-option input[type="radio"] {
+            margin-right: 12px;
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 0.95em;
+            font-weight: 500;
+            color: #a0a0a0;
+        }
+
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            background: #2a2a2a;
+            border: 1px solid #3a3a3a;
+            border-radius: 8px;
+            color: #f5f5f7;
+            font-size: 0.95em;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .form-group select:focus {
+            outline: none;
+            border-color: #0071e3;
+            background: #303030;
+        }
+
+        .form-group select option {
+            background: #2a2a2a;
+            color: #f5f5f7;
+            padding: 8px;
+        }
+
+        select {
+            cursor: pointer;
+        }
+
+        select option {
+            background: #2a2a2a;
+            color: #f5f5f7;
+            padding: 8px;
+        }
+
+        .form-group input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            margin-right: 8px;
+            cursor: pointer;
+        }
+
+        /* Process Button - Apple style */
+        .process-btn {
+            width: 100%;
+            background: #0071e3;
+            color: white;
+            padding: 16px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-top: auto;
+            letter-spacing: -0.01em;
+        }
+
+        .process-btn:hover:not(:disabled) {
+            background: #0077ed;
+            transform: translateY(-1px);
+            box-shadow: 0 8px 20px rgba(0, 113, 227, 0.3);
+        }
+
+        .process-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        /* Progress Section */
+        .progress-section {
+            display: none;
+        }
+
+        .progress-section.active {
+            display: block;
+        }
+
+        .pipeline-stage {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 8px;
+            background: #2a2a2a;
+            font-size: 0.9em;
+            transition: all 0.3s ease;
+            color: #f5f5f7;
+        }
+
+        .pipeline-stage.running {
+            background: linear-gradient(90deg, rgba(0, 113, 227, 0.2), rgba(0, 113, 227, 0.1));
+            border-left: 3px solid #0071e3;
+        }
+
+        .pipeline-stage.complete {
+            background: linear-gradient(90deg, rgba(40, 205, 65, 0.2), rgba(40, 205, 65, 0.1));
+            border-left: 3px solid #28cd41;
+        }
+
+        .stage-icon {
+            margin-right: 12px;
+            font-size: 1.2em;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #3a3a3a;
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 16px 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: #0071e3;
+            width: 0%;
+            transition: width 0.3s ease;
+            border-radius: 3px;
+        }
+
+        .log-preview {
+            background: #161616;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;
+            font-size: 0.75em;
+            max-height: 120px;
+            overflow-y: auto;
+            color: #a0a0a0;
+            margin-top: 16px;
+            border: 1px solid #3a3a3a;
+        }
+
+        /* Result Section */
+        .result-section {
+            display: none;
+        }
+
+        .result-section.active {
+            display: block;
+        }
+
+        .result-btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 10px;
+            font-size: 0.95em;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            display: inline-block;
+            margin: 6px;
+        }
+
+        .result-btn:hover {
+            transform: translateY(-1px);
+        }
+
+        .btn-primary {
+            background: #0071e3;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #0077ed;
+        }
+
+        .btn-secondary {
+            background: #2a2a2a;
+            color: #f5f5f7;
+            border: 1px solid #3a3a3a;
+        }
+
+        .btn-secondary:hover {
+            background: #3a3a3a;
+        }
+
+        .error {
+            color: #ff453a;
+            background: rgba(255, 69, 58, 0.1);
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 16px;
+            display: none;
+            font-size: 0.9em;
+            border: 1px solid rgba(255, 69, 58, 0.3);
+        }
+
+        details {
+            margin-top: 16px;
+            background: #2a2a2a;
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        summary {
+            cursor: pointer;
+            font-weight: 500;
+            color: #f5f5f7;
+            user-select: none;
+            outline: none;
+        }
+
+        details[open] summary {
+            margin-bottom: 16px;
+        }
+
+        .info-box {
+            padding: 16px;
+            background: #2a2a2a;
+            border-radius: 10px;
+            border: 1px solid #3a3a3a;
+            margin-top: 16px;
+            font-size: 0.9em;
+        }
+
+        .small-btn {
+            padding: 6px 12px;
+            background: #ff3b30;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+
+        .small-btn:hover {
+            background: #ff453a;
+        }
+
+        /* Tips section */
+        .tips-section {
+            font-size: 0.9em;
+            line-height: 1.6;
+            color: #a0a0a0;
+        }
+
+        .tips-section strong {
+            color: #f5f5f7;
+            font-weight: 600;
+        }
+
+        .tips-section ul {
+            margin-left: 20px;
+            margin-top: 8px;
+        }
+
+        .tips-section li {
+            margin-bottom: 4px;
+        }
+
+        /* Smooth animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .panel {
+            animation: fadeIn 0.4s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <div class="header">
+            <h1>SIMPLE SPLAT CREATOR v1.0</h1>
+            <div class="header-actions">
+                <input type="file" id="splatFileInput" accept=".ply,.splat" style="display:none" onchange="openSplatFile(this)">
+                <button onclick="document.getElementById('splatFileInput').click()" class="header-btn">Open Splat File</button>
+                <a href="/logs" target="_blank" class="header-btn">View Logs</a>
+                <button onclick="killAllProcesses()" class="header-btn">Stop All</button>
+                <button onclick="cleanupJobs()" class="header-btn">Clean Up</button>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Left Panel: Upload & Settings -->
+            <div class="panel">
+                <div class="panel-title">Upload</div>
+                <div class="upload-zone" id="uploadSection">
+                    <div class="upload-icon">📸</div>
+                    <h3 style="font-weight: 600; margin-bottom: 8px; color: #f5f5f7;">Choose your files</h3>
+                    <p style="color: #a0a0a0; font-size: 0.9em;">Images, ZIP, or Video</p>
+                    <input type="file" id="fileInput" style="display: none;" multiple accept="image/*,.zip,video/*">
+                    <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                        Select Files
+                    </button>
+                    <p style="margin-top: 12px; color: #6e6e73; font-size: 0.85em;">or drag and drop here</p>
+                </div>
+                <div class="file-list" id="fileList"></div>
+
+                <div class="section-title">Processing Method</div>
+                <label class="preset-option">
+                    <input type="radio" name="method" value="traditional" id="methodTraditional" checked>
+                    <span style="font-weight: 600;">🎨 Multi-Image Reconstruction</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — High quality, 10+ images required</span>
+                </label>
+                <label class="preset-option">
+                    <input type="radio" name="method" value="mlsharp" id="methodMLSharp">
+                    <span style="font-weight: 600; color: #32d74b;">⚡ ML-Sharp (Single Image)</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — Ultra fast, single image only (~1 sec)</span>
+                </label>
+
+                <div class="section-title">Quality Preset</div>
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="low">
+                    <span style="font-weight: 600; color: #32d74b;">Fast</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;" id="time-low"> — 3K steps, ~2-5 min</span>
+                </label>
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="medium" checked>
+                    <span style="font-weight: 600; color: #0a84ff;">Balanced</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;" id="time-medium"> — 10K steps, ~5-15 min</span>
+                </label>
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="high">
+                    <span style="font-weight: 600; color: #ff9f0a;">High Quality</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;" id="time-high"> — 30K steps, ~20-60 min</span>
+                </label>
+
+                <div class="info-box">
+                    <label style="display: flex; align-items: center;">
+                        <input type="checkbox" id="sharpnessBoost">
+                        <span style="font-weight: 600;">Ultra Sharpness Mode</span>
+                    </label>
+                    <select id="quickTrainingSteps" style="margin-top: 12px;">
+                        <option value="default">Use Preset Default</option>
+                        <option value="3000">3,000 Steps</option>
+                        <option value="10000">10,000 Steps</option>
+                        <option value="30000">30,000 Steps</option>
+                        <option value="50000">50,000 Steps</option>
+                        <option value="100000">100,000 Steps</option>
+                        <option value="200000">200,000 Steps</option>
+                    </select>
+                </div>
+
+                <div class="info-box" id="mlsharpOptions" style="display: none;">
+                    <label style="display: flex; align-items: center;">
+                        <input type="checkbox" id="mlsharpRender">
+                        <span style="font-weight: 600;">Generate Novel Views</span>
+                    </label>
+                    <p style="color: #6e6e73; font-size: 0.85em; margin-top: 8px;">
+                        Render additional viewpoints (+2 seconds)
+                    </p>
+                    <select id="mlsharpDevice" style="margin-top: 12px;">
+                        <option value="auto">Auto-detect Device</option>
+                        <option value="cuda">CUDA (NVIDIA GPU)</option>
+                        <option value="cpu">CPU (Slower)</option>
+                        <option value="mps">MPS (Apple Silicon)</option>
+                    </select>
+                </div>
+
+                <details>
+                    <summary>Advanced Settings</summary>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="useAdvanced">
+                            Enable custom settings
+                        </label>
+                    </div>
+                    <div id="advancedFields" style="opacity: 0.4; pointer-events: none;">
+                        <div class="form-group">
+                            <label>Matcher Type</label>
+                            <select id="matcherType">
+                                <option value="sequential_matcher">Sequential</option>
+                                <option value="exhaustive_matcher">Exhaustive</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Frame Interval</label>
+                            <select id="interval">
+                                <option value="1">Every frame</option>
+                                <option value="5">Every 5th</option>
+                                <option value="10">Every 10th</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Max Frames</label>
+                            <select id="maxFrames">
+                                <option value="500">500</option>
+                                <option value="1000">1000</option>
+                                <option value="2000">2000</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Detail Level</label>
+                            <select id="detailLevel">
+                                <option value="low">Low</option>
+                                <option value="medium" selected>Medium</option>
+                                <option value="high">High</option>
+                                <option value="ultra">Ultra</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Training Steps</label>
+                            <select id="trainingSteps">
+                                <option value="3000">3,000</option>
+                                <option value="10000" selected>10,000</option>
+                                <option value="30000">30,000</option>
+                                <option value="50000">50,000</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="enableDense" checked>
+                                Enable Dense Reconstruction
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>Dense Image Size</label>
+                            <select id="maxImageSize">
+                                <option value="1600">1600px</option>
+                                <option value="2400">2400px</option>
+                                <option value="3200" selected>3200px</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>MVS Quality</label>
+                            <select id="mvsQualityMode">
+                                <option value="balanced" selected>Balanced</option>
+                                <option value="quality">Quality</option>
+                                <option value="ultra_sharpness">Ultra Sharpness</option>
+                            </select>
+                        </div>
+                    </div>
+                </details>
+
+                <button class="process-btn" id="processBtn" onclick="startProcessing()" disabled>
+                    Start Processing
+                </button>
+            </div>
+
+            <!-- Middle Panel: Progress -->
+            <div class="panel">
+                <div class="panel-title">Processing</div>
+                <div id="idleState">
+                    <p style="text-align: center; color: #6e6e73; margin-top: 60px; font-size: 0.95em;">
+                        Upload files to begin processing
+                    </p>
+                </div>
+                <div class="progress-section" id="progressSection">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+                        <span style="font-weight: 600; color: #0a84ff;" id="currentActivity">Initializing...</span>
+                        <span id="elapsedTime" style="color: #6e6e73; font-family: 'SF Mono', monospace; font-size: 0.9em;">00:00</span>
+                    </div>
+
+                    <div id="pipelineStages">
+                        <div class="pipeline-stage" id="stage1">
+                            <span class="stage-icon">⏳</span>
+                            <span>Feature Extraction</span>
+                        </div>
+                        <div class="pipeline-stage" id="stage2">
+                            <span class="stage-icon">⏳</span>
+                            <span>Feature Matching</span>
+                        </div>
+                        <div class="pipeline-stage" id="stage3">
+                            <span class="stage-icon">⏳</span>
+                            <span>3D Mapping</span>
+                        </div>
+                        <div class="pipeline-stage" id="stage4">
+                            <span class="stage-icon">⏳</span>
+                            <span>Undistortion</span>
+                        </div>
+                        <div class="pipeline-stage" id="stage5">
+                            <span class="stage-icon">⏳</span>
+                            <span>Gaussian Training</span>
+                        </div>
+                    </div>
+
+                    <!-- ML-Sharp Pipeline Stages (hidden by default) -->
+                    <div id="pipelineStagesMLSharp" style="display: none;">
+                        <div class="pipeline-stage" id="mlsharp-stage1">
+                            <span class="stage-icon">⏳</span>
+                            <span>Loading Model</span>
+                        </div>
+                        <div class="pipeline-stage" id="mlsharp-stage2">
+                            <span class="stage-icon">⏳</span>
+                            <span>Predicting Gaussians</span>
+                        </div>
+                        <div class="pipeline-stage" id="mlsharp-stage3">
+                            <span class="stage-icon">⏳</span>
+                            <span>Saving Output</span>
+                        </div>
+                    </div>
+
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+
+                    <div class="log-preview" id="liveLogPreview"></div>
+                </div>
+
+                <div class="error" id="errorMsg"></div>
+            </div>
+
+            <!-- Right Panel: Results & Info -->
+            <div class="panel">
+                <div class="panel-title">Results</div>
+                <div class="result-section" id="resultSection">
+                    <div style="text-align: center;">
+                        <a href="#" class="result-btn btn-primary" id="viewBtn" target="_blank">
+                            View in Browser
+                        </a>
+                    </div>
+                </div>
+
+                <div class="section-title">Tips</div>
+                <div class="tips-section">
+                    <p style="margin-bottom: 12px;"><strong>Capture Tips:</strong></p>
+                    <ul>
+                        <li>20-50 photos around object</li>
+                        <li>60-80% overlap between shots</li>
+                        <li>Move with parallax motion</li>
+                        <li>Good lighting, avoid reflections</li>
+                        <li>Textured surfaces work best</li>
+                    </ul>
+
+                    <p style="margin: 16px 0 8px;"><strong>Hardware Acceleration:</strong></p>
+                    <ul>
+                        <li>GPU (CUDA) for features</li>
+                        <li>All CPU cores for mapping</li>
+                        <li>GPU (Vulkan) for training</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedFiles = [];
+        let currentJobId = null;
+        let processingStartTime = null;
+        let elapsedTimer = null;
+        let gpuSpeedMultiplier = 1.0;
+        let gpuName = null;
+        let currentMethod = 'traditional';
+        let mlsharpAvailable = false;
+
+        const fileInput = document.getElementById('fileInput');
+        const uploadSection = document.getElementById('uploadSection');
+        const fileList = document.getElementById('fileList');
+        const processBtn = document.getElementById('processBtn');
+        const progressSection = document.getElementById('progressSection');
+        const resultSection = document.getElementById('resultSection');
+        const progressFill = document.getElementById('progressFill');
+        const errorMsg = document.getElementById('errorMsg');
+
+        fileInput.addEventListener('change', handleFiles);
+
+        uploadSection.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadSection.classList.add('dragover');
+        });
+
+        uploadSection.addEventListener('dragleave', () => {
+            uploadSection.classList.remove('dragover');
+        });
+
+        uploadSection.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadSection.classList.remove('dragover');
+            fileInput.files = e.dataTransfer.files;
+            handleFiles();
+        });
+
+        async function fetchGPUInfo() {
+            try {
+                const response = await fetch('/gpu-info');
+                const data = await response.json();
+                if (data.speed_multiplier) {
+                    gpuSpeedMultiplier = data.speed_multiplier;
+                    gpuName = data.gpu_name || 'CPU';
+                    console.log(`GPU detected: ${gpuName}, speed multiplier: ${gpuSpeedMultiplier}`);
+                }
+            } catch (error) {
+                console.log('Could not fetch GPU info:', error);
+                gpuSpeedMultiplier = 1.0;
+            }
+        }
+
+        // Check ML-Sharp availability on page load
+        async function checkMLSharpAvailability() {
+            try {
+                const response = await fetch('/mlsharp-info');
+                const info = await response.json();
+                mlsharpAvailable = info.available;
+                if (!mlsharpAvailable) {
+                    document.getElementById('methodMLSharp').disabled = true;
+                    document.getElementById('methodMLSharp').parentElement.style.opacity = '0.5';
+                    document.getElementById('methodMLSharp').parentElement.title = 'ML-Sharp not installed. See README for installation instructions';
+                }
+            } catch (error) {
+                console.log('Could not fetch ML-Sharp info:', error);
+                mlsharpAvailable = false;
+            }
+        }
+
+        // Call on page load
+        fetchGPUInfo();
+        checkMLSharpAvailability();
+
+        // Update UI based on selected method
+        function updateUIForMethod() {
+            const method = document.querySelector('input[name="method"]:checked').value;
+            currentMethod = method;
+
+            if (method === 'mlsharp') {
+                // ML-Sharp mode: single image only
+                fileInput.removeAttribute('multiple');
+                fileInput.accept = 'image/*';
+
+                // Hide traditional settings
+                document.querySelectorAll('.preset-option').forEach(el => {
+                    if (el.querySelector('input[name="preset"]')) el.style.display = 'none';
+                });
+                document.querySelector('details').style.display = 'none';
+                document.querySelector('#sharpnessBoost').closest('.info-box').style.display = 'none';
+
+                // Show ML-Sharp options
+                document.getElementById('mlsharpOptions').style.display = 'block';
+                document.getElementById('pipelineStages').style.display = 'none';
+                document.getElementById('pipelineStagesMLSharp').style.display = 'block';
+
+                processBtn.textContent = '⚡ Process with ML-Sharp';
+
+                // Clear existing files if multiple selected
+                if (selectedFiles.length > 1) {
+                    clearFiles();
+                }
+            } else {
+                // Traditional mode: restore defaults
+                fileInput.setAttribute('multiple', 'multiple');
+                fileInput.accept = 'image/*,.zip,video/*';
+
+                document.querySelectorAll('.preset-option').forEach(el => {
+                    if (el.querySelector('input[name="preset"]')) el.style.display = 'block';
+                });
+                document.querySelector('details').style.display = 'block';
+                document.querySelector('#sharpnessBoost').closest('.info-box').style.display = 'block';
+
+                document.getElementById('mlsharpOptions').style.display = 'none';
+                document.getElementById('pipelineStages').style.display = 'block';
+                document.getElementById('pipelineStagesMLSharp').style.display = 'none';
+
+                processBtn.textContent = 'Start Processing';
+            }
+
+            updateTimeEstimates();
+        }
+
+        // Add event listeners for method radio buttons
+        document.querySelectorAll('input[name="method"]').forEach(radio => {
+            radio.addEventListener('change', updateUIForMethod);
+        });
+
+        function updateTimeEstimates() {
+            const numImages = selectedFiles.length;
+
+            // Base times per image (in minutes) - calibrated for RTX 30 series GPU
+            const baseTimes = {
+                low: { min: 0.08, max: 0.15 },      // ~5-9 sec per image
+                medium: { min: 0.2, max: 0.5 },     // ~12-30 sec per image
+                high: { min: 1, max: 2.5 }          // ~1-2.5 min per image
+            };
+
+            if (numImages === 0) {
+                // Reset to default estimates
+                document.getElementById('time-low').textContent = ' — 3K steps, ~2-5 min';
+                document.getElementById('time-medium').textContent = ' — 10K steps, ~5-15 min';
+                document.getElementById('time-high').textContent = ' — 30K steps, ~20-60 min';
+                return;
+            }
+
+            // Calculate estimates with GPU speed multiplier
+            for (const [preset, times] of Object.entries(baseTimes)) {
+                const minTime = Math.ceil(times.min * numImages * gpuSpeedMultiplier);
+                const maxTime = Math.ceil(times.max * numImages * gpuSpeedMultiplier);
+
+                const steps = preset === 'low' ? '3K' : preset === 'medium' ? '10K' : '30K';
+                let timeStr;
+
+                if (maxTime < 60) {
+                    timeStr = `~${minTime}-${maxTime} min`;
+                } else {
+                    const minHours = Math.floor(minTime / 60);
+                    const minMins = minTime % 60;
+                    const maxHours = Math.floor(maxTime / 60);
+                    const maxMins = maxTime % 60;
+
+                    if (minHours === 0) {
+                        timeStr = `~${minMins} min - ${maxHours}h ${maxMins}m`;
+                    } else {
+                        timeStr = `~${minHours}h ${minMins}m - ${maxHours}h ${maxMins}m`;
+                    }
+                }
+
+                document.getElementById(`time-${preset}`).textContent = ` — ${steps} steps, ${timeStr} (${numImages} images)`;
+            }
+        }
+
+        function handleFiles() {
+            selectedFiles = Array.from(fileInput.files);
+            displayFileList();
+            updateTimeEstimates();
+            processBtn.disabled = selectedFiles.length === 0;
+        }
+
+        function displayFileList() {
+            fileList.innerHTML = '';
+            if (selectedFiles.length === 0) return;
+
+            const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
+            const totalSizeMB = (totalSize / 1024 / 1024).toFixed(2);
+            const sortedFiles = [...selectedFiles].sort((a, b) => a.name.localeCompare(b.name));
+            const firstName = sortedFiles[0].name;
+            const lastName = sortedFiles[sortedFiles.length - 1].name;
+
+            const fileItem = document.createElement('div');
+            fileItem.className = 'file-item';
+
+            if (selectedFiles.length === 1) {
+                fileItem.innerHTML = `
+                    <span>${selectedFiles[0].name} (${totalSizeMB} MB)</span>
+                    <button onclick="clearFiles()" class="small-btn">Remove</button>
+                `;
+            } else {
+                fileItem.innerHTML = `
+                    <span>${selectedFiles.length} files (${totalSizeMB} MB)</span>
+                    <button onclick="clearFiles()" class="small-btn">Clear</button>
+                `;
+            }
+            fileList.appendChild(fileItem);
+        }
+
+        function clearFiles() {
+            selectedFiles = [];
+            fileInput.value = '';
+            displayFileList();
+            updateTimeEstimates();
+            processBtn.disabled = true;
+        }
+
+        async function startProcessing() {
+            if (selectedFiles.length === 0) {
+                showError('Please select files first');
+                return;
+            }
+
+            processBtn.disabled = true;
+            document.getElementById('idleState').style.display = 'none';
+            progressSection.classList.add('active');
+            resultSection.classList.remove('active');
+            errorMsg.style.display = 'none';
+
+            resetPipelineStages();
+            processingStartTime = Date.now();
+            startElapsedTimer();
+
+            const formData = new FormData();
+            selectedFiles.forEach(file => formData.append('files', file));
+
+            const method = document.querySelector('input[name="method"]:checked').value;
+
+            // ML-Sharp validation
+            if (method === 'mlsharp' && selectedFiles.length !== 1) {
+                showError('ML-Sharp requires exactly one image');
+                processBtn.disabled = false;
+                stopElapsedTimer();
+                return;
+            }
+
+            // Add method
+            formData.append('method', method);
+
+            if (method === 'mlsharp') {
+                // ML-Sharp specific options
+                formData.append('mlsharp_render', document.getElementById('mlsharpRender').checked ? 'true' : 'false');
+                formData.append('mlsharp_device', document.getElementById('mlsharpDevice').value);
+            } else {
+                // Traditional pipeline options
+                const presetRadio = document.querySelector('input[name="preset"]:checked');
+            const preset = presetRadio ? presetRadio.value : 'medium';
+            formData.append('preset', preset);
+
+            const sharpnessBoost = document.getElementById('sharpnessBoost').checked;
+            const quickTrainingSteps = document.getElementById('quickTrainingSteps').value;
+            formData.append('sharpness_boost', sharpnessBoost ? 'true' : 'false');
+            if (quickTrainingSteps !== 'default') {
+                formData.append('quick_training_steps', quickTrainingSteps);
+            }
+
+            formData.append('matcher_type', document.getElementById('matcherType').value);
+            formData.append('interval', document.getElementById('interval').value);
+            formData.append('max_frames', document.getElementById('maxFrames').value);
+
+            const useAdvanced = document.getElementById('useAdvanced').checked;
+            formData.append('use_advanced', useAdvanced ? 'true' : 'false');
+
+            if (useAdvanced) {
+                formData.append('training_steps', document.getElementById('trainingSteps').value);
+                formData.append('detail_level', document.getElementById('detailLevel').value);
+                formData.append('mvs_quality_mode', document.getElementById('mvsQualityMode').value);
+                formData.append('enable_dense', document.getElementById('enableDense').checked ? 'true' : 'false');
+                formData.append('max_image_size', document.getElementById('maxImageSize').value);
+            }
+            }
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    currentJobId = data.job_id;
+                    pollStatus();
+                    pollLogs();
+                } else {
+                    showError(data.error || 'Upload failed');
+                    processBtn.disabled = false;
+                    stopElapsedTimer();
+                }
+            } catch (error) {
+                showError('Error: ' + error.message);
+                processBtn.disabled = false;
+                stopElapsedTimer();
+            }
+        }
+
+        function resetPipelineStages() {
+            for (let i = 1; i <= 5; i++) {
+                const stage = document.getElementById('stage' + i);
+                if (stage) {
+                    stage.className = 'pipeline-stage';
+                    stage.querySelector('.stage-icon').textContent = '⏳';
+                }
+            }
+            document.getElementById('currentActivity').textContent = 'Initializing...';
+            document.getElementById('liveLogPreview').innerHTML = '';
+        }
+
+        function updatePipelineStage(stageNum, status) {
+            const stage = document.getElementById('stage' + stageNum);
+            if (!stage) return;
+
+            const icon = stage.querySelector('.stage-icon');
+
+            if (status === 'running') {
+                stage.className = 'pipeline-stage running';
+                icon.textContent = '🔄';
+            } else if (status === 'complete') {
+                stage.className = 'pipeline-stage complete';
+                icon.textContent = '✓';
+            } else if (status === 'error') {
+                stage.className = 'pipeline-stage';
+                icon.textContent = '✕';
+            }
+        }
+
+        function startElapsedTimer() {
+            stopElapsedTimer();
+            elapsedTimer = setInterval(() => {
+                if (processingStartTime) {
+                    const elapsed = Math.floor((Date.now() - processingStartTime) / 1000);
+                    const mins = Math.floor(elapsed / 60);
+                    const secs = elapsed % 60;
+                    document.getElementById('elapsedTime').textContent =
+                        `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                }
+            }, 1000);
+        }
+
+        function stopElapsedTimer() {
+            if (elapsedTimer) {
+                clearInterval(elapsedTimer);
+                elapsedTimer = null;
+            }
+        }
+
+        async function pollStatus() {
+            if (!currentJobId) return;
+
+            try {
+                const response = await fetch(`/status/${currentJobId}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        setTimeout(pollStatus, 1000);
+                        return;
+                    }
+                    showError(data.error || 'Failed to get status');
+                    processBtn.disabled = false;
+                    stopElapsedTimer();
+                    return;
+                }
+
+                if (data.status === 'completed') {
+                    progressFill.style.width = '100%';
+                    document.getElementById('currentActivity').textContent = 'Complete';
+                    for (let i = 1; i <= 5; i++) updatePipelineStage(i, 'complete');
+                    stopElapsedTimer();
+                    showResults();
+                } else if (data.status === 'error') {
+                    showError(data.error || 'Processing failed');
+                    document.getElementById('currentActivity').textContent = 'Error';
+                    processBtn.disabled = false;
+                    stopElapsedTimer();
+                } else if (data.status === 'cancelled') {
+                    showError('Processing was cancelled');
+                    document.getElementById('currentActivity').textContent = 'Cancelled';
+                    processBtn.disabled = false;
+                    stopElapsedTimer();
+                } else {
+                    const step = data.step || 'Processing...';
+                    progressFill.style.width = (data.progress || 0) + '%';
+                    document.getElementById('currentActivity').textContent = step;
+
+                    updateStagesFromStep(step, data.progress || 0);
+
+                    setTimeout(pollStatus, 1500);
+                }
+            } catch (error) {
+                showError('Error checking status: ' + error.message);
+                processBtn.disabled = false;
+                stopElapsedTimer();
+            }
+        }
+
+        function updateStagesFromStep(step, progress) {
+            const stepLower = step.toLowerCase();
+
+            if (currentMethod === 'mlsharp') {
+                // ML-Sharp pipeline stages
+                if (stepLower.includes('loading') || stepLower.includes('initializing') || stepLower.includes('model')) {
+                    updateMLSharpStage(1, 'running');
+                } else if (stepLower.includes('predict') || stepLower.includes('inference') || stepLower.includes('gaussians')) {
+                    updateMLSharpStage(1, 'complete');
+                    updateMLSharpStage(2, 'running');
+                } else if (stepLower.includes('saving') || stepLower.includes('writing') || stepLower.includes('complete')) {
+                    updateMLSharpStage(1, 'complete');
+                    updateMLSharpStage(2, 'complete');
+                    updateMLSharpStage(3, 'running');
+                }
+            } else {
+                // Traditional pipeline stages
+                if (stepLower.includes('feature extraction') || stepLower.includes('extracting features')) {
+                    updatePipelineStage(1, 'running');
+                } else if (stepLower.includes('feature matching') || stepLower.includes('matching')) {
+                    updatePipelineStage(1, 'complete');
+                    updatePipelineStage(2, 'running');
+                } else if (stepLower.includes('3d mapping') || stepLower.includes('mapper') || stepLower.includes('registered')) {
+                    updatePipelineStage(1, 'complete');
+                    updatePipelineStage(2, 'complete');
+                    updatePipelineStage(3, 'running');
+                } else if (stepLower.includes('undistort')) {
+                    updatePipelineStage(1, 'complete');
+                    updatePipelineStage(2, 'complete');
+                    updatePipelineStage(3, 'complete');
+                    updatePipelineStage(4, 'running');
+                } else if (stepLower.includes('gaussian') || stepLower.includes('brush') || stepLower.includes('training')) {
+                    updatePipelineStage(1, 'complete');
+                    updatePipelineStage(2, 'complete');
+                    updatePipelineStage(3, 'complete');
+                    updatePipelineStage(4, 'complete');
+                    updatePipelineStage(5, 'running');
+                }
+            }
+        }
+
+        function updateMLSharpStage(stageNum, status) {
+            const stage = document.getElementById('mlsharp-stage' + stageNum);
+            if (!stage) return;
+            const icon = stage.querySelector('.stage-icon');
+            if (status === 'running') {
+                stage.className = 'pipeline-stage running';
+                icon.textContent = '🔄';
+            } else if (status === 'complete') {
+                stage.className = 'pipeline-stage complete';
+                icon.textContent = '✓';
+            }
+        }
+
+        async function pollLogs() {
+            if (!currentJobId) return;
+
+            try {
+                const response = await fetch(`/logs/json/${currentJobId}`);
+                const logs = await response.json();
+
+                const recentLogs = logs.slice(-5);
+
+                const logPreview = document.getElementById('liveLogPreview');
+                if (logPreview && recentLogs.length > 0) {
+                    logPreview.innerHTML = '';
+
+                    recentLogs.forEach(log => {
+                        let color = '#6e6e73';
+                        if (log.includes('[ERROR]')) color = '#d70015';
+                        else if (log.includes('[WARNING]')) color = '#ff9500';
+                        else if (log.includes('complete')) color = '#28cd41';
+                        else if (log.includes('Step')) color = '#0071e3';
+
+                        const div = document.createElement('div');
+                        div.style.color = color;
+                        div.style.margin = '2px 0';
+                        div.textContent = log;
+                        logPreview.appendChild(div);
+                    });
+                    logPreview.scrollTop = logPreview.scrollHeight;
+                }
+
+                const statusResponse = await fetch(`/status/${currentJobId}`);
+                const statusData = await statusResponse.json();
+                if (statusData.status === 'processing') {
+                    setTimeout(pollLogs, 2000);
+                }
+            } catch (error) {
+                console.log('Log polling error:', error);
+            }
+        }
+
+        function showResults() {
+            resultSection.classList.add('active');
+            document.getElementById('viewBtn').href = `/static/supersplat/index.html?load=/ply/${currentJobId}.ply`;
+        }
+
+        function showError(message) {
+            errorMsg.textContent = message;
+            errorMsg.style.display = 'block';
+        }
+
+        async function killAllProcesses() {
+            if (!confirm('Stop all running processes?')) return;
+            try {
+                const response = await fetch('/kill', { method: 'POST' });
+                const data = await response.json();
+                alert(data.message);
+                progressSection.classList.remove('active');
+                processBtn.disabled = selectedFiles.length === 0;
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function cleanupJobs() {
+            if (!confirm('Delete all previous jobs?')) return;
+            try {
+                const response = await fetch('/cleanup', { method: 'POST' });
+                const data = await response.json();
+                if (response.ok) {
+                    alert('Cleanup complete!');
+                    location.reload();
+                } else {
+                    alert('Cleanup failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Cleanup failed: ' + error.message);
+            }
+        }
+
+        async function openSplatFile(input) {
+            const file = input.files[0];
+            if (!file) return;
+            input.value = '';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload-for-view', { method: 'POST', body: formData });
+                const data = await response.json();
+                if (data.token) {
+                    window.open(`/static/supersplat/index.html?load=/ply/${data.token}.ply`, '_blank');
+                } else {
+                    alert('Error: ' + (data.error || 'Upload failed'));
+                }
+            } catch (err) {
+                alert('Error uploading file: ' + err.message);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            // Fetch GPU info for accurate time estimates
+            fetchGPUInfo();
+
+            const useAdvancedCheckbox = document.getElementById('useAdvanced');
+            const advancedFields = document.getElementById('advancedFields');
+
+            if (useAdvancedCheckbox && advancedFields) {
+                useAdvancedCheckbox.addEventListener('change', function() {
+                    if (this.checked) {
+                        advancedFields.style.opacity = '1';
+                        advancedFields.style.pointerEvents = 'auto';
+                    } else {
+                        advancedFields.style.opacity = '0.4';
+                        advancedFields.style.pointerEvents = 'none';
+                    }
+                });
+            }
+        });
+    </script>
+</body>
+</html>

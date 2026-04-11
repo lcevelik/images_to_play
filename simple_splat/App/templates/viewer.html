@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gaussian Splat Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0d0d0d;
+            overflow: hidden;
+            color: #f5f5f7;
+        }
+
+        #container {
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(26, 26, 26, 0.92);
+            backdrop-filter: blur(20px);
+            padding: 18px;
+            border-radius: 14px;
+            z-index: 1000;
+            min-width: 200px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+
+        .controls h3 {
+            font-size: 0.95em;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #f5f5f7;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .badge {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: #fff;
+            font-size: 0.65em;
+            padding: 2px 8px;
+            border-radius: 5px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .ctrl-btn {
+            display: block;
+            width: 100%;
+            padding: 9px 12px;
+            margin: 6px 0;
+            background: #2a2a2a;
+            color: #f5f5f7;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+            text-align: left;
+            transition: background 0.15s;
+        }
+
+        .ctrl-btn:hover { background: #3a3a3a; }
+
+        .ctrl-btn.primary {
+            background: #0071e3;
+            margin-bottom: 10px;
+        }
+        .ctrl-btn.primary:hover { background: #0077ed; }
+
+        .info-bar {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(26, 26, 26, 0.92);
+            backdrop-filter: blur(20px);
+            padding: 12px 16px;
+            border-radius: 10px;
+            font-size: 0.82em;
+            border: 1px solid rgba(255,255,255,0.1);
+            z-index: 1000;
+            color: #a0a0a0;
+        }
+
+        .info-bar strong { color: #f5f5f7; }
+
+        .help-box {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(26, 26, 26, 0.92);
+            backdrop-filter: blur(20px);
+            padding: 12px 16px;
+            border-radius: 10px;
+            font-size: 0.82em;
+            border: 1px solid rgba(255,255,255,0.1);
+            z-index: 1000;
+            color: #a0a0a0;
+            line-height: 1.7;
+        }
+
+        .help-box strong { color: #f5f5f7; }
+
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(26, 26, 26, 0.95);
+            padding: 30px 40px;
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.1);
+            z-index: 2000;
+            text-align: center;
+        }
+
+        .spinner {
+            width: 44px;
+            height: 44px;
+            border: 4px solid rgba(255,255,255,0.1);
+            border-top-color: #0071e3;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        #error-box {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(100, 0, 0, 0.95);
+            padding: 30px 40px;
+            border-radius: 16px;
+            border: 1px solid rgba(255,100,100,0.3);
+            z-index: 2000;
+            text-align: center;
+            max-width: 480px;
+        }
+
+        #error-box h3 { margin-bottom: 10px; }
+        #error-box p { color: #ffaaaa; font-size: 0.9em; margin-top: 8px; }
+
+        .sep {
+            border: none;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            margin: 10px 0;
+        }
+    </style>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+            "@mkkellogg/gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.1/build/gaussian-splats-3d.module.min.js"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="container"></div>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <p style="font-weight:600; color:#f5f5f7;">Loading Gaussian Splat...</p>
+        <p style="color:#a0a0a0; font-size:0.88em; margin-top:8px;" id="load-pct">Downloading...</p>
+    </div>
+
+    <div id="error-box">
+        <h3>⚠️ Load Error</h3>
+        <p id="error-msg">Failed to load the splat file.</p>
+        <button onclick="location.reload()" style="margin-top:16px; padding:10px 20px; background:#0071e3; color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600;">Retry</button>
+    </div>
+
+    <div class="controls">
+        <h3>🎮 Controls <span class="badge">Gaussian Splat</span></h3>
+        <button class="ctrl-btn" onclick="resetView()">🎯 Reset View</button>
+        <hr class="sep">
+        <button class="ctrl-btn" onclick="window.location.href='/'" >← Back to App</button>
+        <button class="ctrl-btn" onclick="downloadPly()">💾 Download PLY</button>
+    </div>
+
+    <div class="info-bar">
+        <strong>Job:</strong> <span style="font-family:monospace; font-size:0.9em;">{{ job_id[:8] }}</span>
+    </div>
+
+    <div class="help-box">
+        <p>🖱️ <strong>Left Drag</strong> — Rotate</p>
+        <p>🖱️ <strong>Right Drag</strong> — Pan</p>
+        <p>📏 <strong>Scroll</strong> — Zoom</p>
+    </div>
+
+    <script type="module">
+        import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
+
+        const jobId = "{{ job_id }}";
+        const plyUrl = `/ply/${jobId}`;
+
+        let viewer = null;
+
+        function showError(msg) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error-msg').textContent = msg;
+            document.getElementById('error-box').style.display = 'block';
+        }
+
+        viewer = new GaussianSplats3D.Viewer({
+            rootElement: document.getElementById('container'),
+            // COLMAP trains with Y-down convention — flip so model is right-side up
+            cameraUp: [0, -1, 0],
+            initialCameraPosition: [0, -3, 6],
+            initialCameraLookAt: [0, 0, 0],
+            selfDrivenMode: true,
+            useBuiltInControls: true,
+        });
+
+        // Use .then()/.catch() — AbortablePromise does not behave correctly with async/await
+        viewer.addSplatScene(plyUrl, {
+            splatAlphaRemovalThreshold: 5,
+        })
+        .then(() => {
+            document.getElementById('loading').style.display = 'none';
+            viewer.start();
+        })
+        .catch((err) => {
+            console.error('Viewer error:', err);
+            showError(err && err.message ? err.message : String(err));
+        });
+
+        window.resetView = function () {
+            if (!viewer) return;
+            viewer.camera.position.set(0, -3, 6);
+            viewer.camera.lookAt(0, 0, 0);
+        };
+
+        window.downloadPly = function () {
+            window.location.href = `/download/${jobId}/ply`;
+        };
+    </script>
+</body>
+</html>

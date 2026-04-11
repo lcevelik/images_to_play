@@ -1,0 +1,37 @@
+# Gaussian Splatting App - Python Dependencies
+#
+# Installed offline from pre-downloaded wheels in App\wheels\ on first run.
+# No internet connection required. Exact versions match bundled .whl files.
+
+# Web framework
+Flask==3.0.0
+Werkzeug==3.0.1
+Flask-CORS==6.0.2
+
+# Flask transitive dependencies (bundled as wheels)
+blinker==1.9.0
+click==8.3.1
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+colorama==0.4.6
+
+# Image/video processing (video frame extraction)
+opencv-python==4.13.0.92
+
+# Process management (kill COLMAP/Brush jobs)
+psutil==7.2.2
+
+# Read COLMAP sparse reconstruction stats
+pycolmap==3.13.0
+
+# Required by pycolmap
+numpy==2.4.2
+
+# ---------------------------------------------------------------------------
+# Optional: ML-Sharp (single-image fast processing) - NOT bundled
+# Install from source if needed:
+#   git clone https://github.com/apple/ml-sharp.git
+#   cd ml-sharp && pip install -r requirements.txt
+#   sharp --version
+# ---------------------------------------------------------------------------
