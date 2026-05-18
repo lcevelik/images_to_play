@@ -416,8 +416,11 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         # Add bundled COLMAP lib to PATH first (so DLLs are found without a system error popup)
         _app_dir = os.path.dirname(os.path.abspath(__file__))
         _project_root = os.path.dirname(_app_dir)
+        _bundled_colmap_bin_dir = os.path.join(_project_root, 'COLMAP', 'bin')
         _bundled_colmap_lib = os.path.join(_project_root, 'COLMAP', 'lib')
-        _bundled_colmap_bin = os.path.join(_project_root, 'COLMAP', 'bin', 'colmap.exe')
+        _bundled_colmap_bin = os.path.join(_bundled_colmap_bin_dir, 'colmap.exe')
+        if os.path.exists(_bundled_colmap_bin_dir):
+            os.environ["PATH"] = _bundled_colmap_bin_dir + ";" + os.environ.get("PATH", "")
         if os.path.exists(_bundled_colmap_lib):
             os.environ["PATH"] = _bundled_colmap_lib + ";" + os.environ.get("PATH", "")
 
@@ -426,13 +429,15 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         possible_paths = [
             _bundled_colmap_bin,  # Bundled COLMAP (highest priority - correct version)
             "colmap",  # In PATH
-            r"C:\COLMAP\COLMAP.bat",  # Wrapper that sets up DLL paths
             r"C:\COLMAP\bin\colmap.exe",
             r"C:\COLMAP\colmap.exe",
         ]
 
-        # Also add system COLMAP lib folder to PATH if present
+        # Also add system COLMAP bin/lib folders to PATH if present
+        colmap_bin_dir = r"C:\COLMAP\bin"
         colmap_lib = r"C:\COLMAP\lib"
+        if os.path.exists(colmap_bin_dir):
+            os.environ["PATH"] = colmap_bin_dir + ";" + os.environ.get("PATH", "")
         if os.path.exists(colmap_lib):
             os.environ["PATH"] = colmap_lib + ";" + os.environ.get("PATH", "")
 
@@ -450,32 +455,16 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             add_log("COLMAP not found!", "ERROR")
             raise Exception("COLMAP is not installed or not in PATH. Please install COLMAP and add it to your PATH, or install it to C:\\COLMAP\\bin\\")
 
-        # Check for GLOMAP
-        glomap_path = None
-        possible_glomap_paths = [
-            r"C:\COLMAP\bin\glomap.exe",
-            r"C:\COLMAP\glomap.exe",
-            "glomap",  # In PATH
-        ]
-
-        for path in possible_glomap_paths:
-            try:
-                if os.path.isabs(path) and os.path.exists(path):
-                    glomap_path = path
-                    add_log(f"GLOMAP found at: {path}", "INFO")
-                    break
-                result = subprocess.run([path, "--help"], capture_output=True, timeout=5)
-                if result.returncode in [0, 1]:
-                    glomap_path = path
-                    add_log(f"GLOMAP found at: {path}", "INFO")
-                    break
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                continue
-
-        if glomap_path:
-            add_log("Will use GLOMAP mapper (faster global optimization)", "INFO")
-        else:
-            add_log("GLOMAP not found - using COLMAP mapper (slower but works)", "WARNING")
+        # Check for COLMAP global_mapper (COLMAP 4.0+, replaces standalone GLOMAP)
+        try:
+            gm_check = subprocess.run([colmap_path, 'global_mapper', '--help'],
+                                       capture_output=True, timeout=10)
+            if gm_check.returncode == 0:
+                add_log("COLMAP global_mapper available (COLMAP 4.0+ built-in GLOMAP)", "INFO")
+            else:
+                add_log("global_mapper not available - using COLMAP incremental mapper", "WARNING")
+        except Exception:
+            add_log("global_mapper not available - using COLMAP incremental mapper", "WARNING")
 
         processing_status[job_id]['step'] = 'Running COLMAP feature extraction...'
         processing_status[job_id]['progress'] = 20

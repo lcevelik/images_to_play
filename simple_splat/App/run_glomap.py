@@ -228,16 +228,23 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     log_file_path = os.path.join(parent_dir, "colmap_run.log")
     total_start_time = time.time()
 
-    # Add bundled COLMAP lib folder to PATH for DLL loading (highest priority)
+    # Add COLMAP bin/lib folders to PATH for DLL loading
+    # COLMAP 4.x bundles all DLLs in bin/; 3.x used a separate lib/ folder
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
     bundled_colmap_lib = os.path.join(project_root, 'COLMAP', 'lib')
-    bundled_colmap_bin = os.path.join(project_root, 'COLMAP', 'bin', 'colmap.exe')
+    bundled_colmap_bin_dir = os.path.join(project_root, 'COLMAP', 'bin')
+    bundled_colmap_bin = os.path.join(bundled_colmap_bin_dir, 'colmap.exe')
+    if os.path.exists(bundled_colmap_bin_dir):
+        os.environ["PATH"] = bundled_colmap_bin_dir + ";" + os.environ.get("PATH", "")
     if os.path.exists(bundled_colmap_lib):
         os.environ["PATH"] = bundled_colmap_lib + ";" + os.environ.get("PATH", "")
 
-    # Also add system COLMAP lib folder if present
+    # Also add system COLMAP bin/lib folders if present
+    colmap_bin_dir = r"C:\COLMAP\bin"
     colmap_lib = r"C:\COLMAP\lib"
+    if os.path.exists(colmap_bin_dir):
+        os.environ["PATH"] = colmap_bin_dir + ";" + os.environ.get("PATH", "")
     if os.path.exists(colmap_lib):
         os.environ["PATH"] = colmap_lib + ";" + os.environ.get("PATH", "")
 
@@ -265,43 +272,35 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
 
     colmap_cmd = f'"{colmap_path}"' if colmap_path != "colmap" else "colmap"
 
-    # Check if GLOMAP is available - try multiple paths
-    glomap_path = None
-    possible_glomap_paths = [
-        r"C:\COLMAP\bin\glomap.exe",
-        r"C:\COLMAP\glomap.exe",
-        "glomap",  # In PATH
-    ]
+    # Check if COLMAP has global_mapper (COLMAP 4.0+, replaces standalone GLOMAP binary)
+    use_glomap = False
+    glomap_path = None  # kept for output-path handling below
+    try:
+        gm_check = subprocess.run([colmap_path, 'global_mapper', '--help'],
+                                   capture_output=True, timeout=10)
+        if gm_check.returncode == 0:
+            use_glomap = True
+            glomap_path = colmap_path
+            print("COLMAP global_mapper available (COLMAP 4.0+, built-in GLOMAP)")
+    except Exception:
+        pass
 
-    for path in possible_glomap_paths:
-        try:
-            # Check if the file exists first (for absolute paths)
-            if os.path.isabs(path) and os.path.exists(path):
-                glomap_path = path
-                use_glomap = True
-                print(f"GLOMAP found at: {path}")
-                break
-            # For PATH entries, try running
-            glomap_check = subprocess.run([path, "--help"], capture_output=True, timeout=5)
-            if glomap_check.returncode in [0, 1]:
-                glomap_path = path
-                use_glomap = True
-                print(f"GLOMAP found at: {path}")
-                break
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            continue
+    if not use_glomap:
+        print("global_mapper not available, will use COLMAP incremental mapper")
 
-    if not glomap_path:
-        use_glomap = False
-        print("GLOMAP not found, will use COLMAP mapper")
-    
     if use_glomap:
-        # Use GLOMAP mapper (faster, global optimization)
+        # Use COLMAP global_mapper (COLMAP 4.0+ built-in replacement for standalone GLOMAP)
+        # ~10-100x faster than incremental mapper for large datasets
         glomap_output = os.path.join(distorted_folder, 'sparse')
         os.makedirs(glomap_output, exist_ok=True)
-        glomap_cmd = f'"{glomap_path}"' if glomap_path != "glomap" else "glomap"
-        mapper_cmd = f'{glomap_cmd} mapper --database_path "{database_path}" --image_path "{image_path}" --output_path "{glomap_output}" --TrackEstablishment.max_num_tracks {settings["tracks"]}'
-        print("Using GLOMAP mapper (faster)")
+        mapper_cmd = (
+            f'{colmap_cmd} global_mapper '
+            f'--database_path "{database_path}" '
+            f'--image_path "{image_path}" '
+            f'--output_path "{glomap_output}" '
+            f'--GlobalMapper.track_min_num_views_per_track 2'
+        )
+        print("Using COLMAP global_mapper (faster global SfM)")
     else:
         # Use COLMAP mapper with settings based on detail level
         # Lower tri_angle and higher reproj_error = MORE points kept
