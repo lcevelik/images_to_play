@@ -354,9 +354,9 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
         f'--ImageReader.single_camera 1 '
         f'--ImageReader.camera_model SIMPLE_RADIAL '
         f'{feature_limit}'
-        f'--SiftExtraction.use_gpu 1 '
-        f'--SiftExtraction.gpu_index 0,1 '
-        f'--SiftExtraction.num_threads {num_threads} '
+        f'--FeatureExtraction.use_gpu 1 '
+        f'--FeatureExtraction.gpu_index -1 '
+        f'--FeatureExtraction.num_threads {num_threads} '
         f'--SiftExtraction.first_octave -1 '
         f'--SiftExtraction.peak_threshold {settings["peak"]} '
         f'--SiftExtraction.num_octaves {settings["octaves"]} '
@@ -371,6 +371,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             f' --SiftExtraction.domain_size_pooling 1'
             f' --SiftExtraction.estimate_affine_shape 1'
             f' --FeatureExtraction.max_image_size {settings.get("max_image_size", 8192)}'
+            # FeatureExtraction.max_image_size is correct in both 3.x and 4.x
         )
         log_progress("[EXPERT] Domain size pooling: ENABLED", "INFO")
         log_progress("[EXPERT] Affine shape estimation: ENABLED", "INFO")
@@ -384,11 +385,11 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     match_cmd = (
         f'{colmap_cmd} {matcher_type} '
         f'--database_path "{database_path}" '
-        f'--SiftMatching.use_gpu 1 '
-        f'--SiftMatching.gpu_index 0,1 '
-        f'--SiftMatching.num_threads {num_threads} '
+        f'--FeatureMatching.use_gpu 1 '
+        f'--FeatureMatching.gpu_index -1 '
+        f'--FeatureMatching.num_threads {num_threads} '
         f'--SiftMatching.max_ratio {settings["match_ratio"]} '
-        f'--SiftMatching.max_num_matches {max_matches}'
+        f'--FeatureMatching.max_num_matches {max_matches}'
     )
     log_progress(f"[MATCH] Max matches per pair: {max_matches}", "INFO")
     log_progress(f"[CPU] Using {num_threads} threads for matching", "INFO")
@@ -421,7 +422,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     
     # Expert mode: add guided matching
     if settings.get('expert', False) and settings.get('guided_matching', False):
-        match_cmd += ' --SiftMatching.guided_matching 1'
+        match_cmd += ' --FeatureMatching.guided_matching 1'
         log_progress("[EXPERT] Guided matching: ENABLED", "INFO")
     
     # Named commands with descriptions for better logging
