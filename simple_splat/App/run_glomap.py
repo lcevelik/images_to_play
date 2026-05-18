@@ -355,9 +355,9 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
         f'--ImageReader.single_camera 1 '
         f'--ImageReader.camera_model SIMPLE_RADIAL '
         f'{feature_limit}'
-        f'--FeatureExtraction.use_gpu 1 '
-        f'--FeatureExtraction.gpu_index 0,1 '
-        f'--FeatureExtraction.num_threads {num_threads} '
+        f'--SiftExtraction.use_gpu 1 '
+        f'--SiftExtraction.gpu_index 0,1 '
+        f'--SiftExtraction.num_threads {num_threads} '
         f'--SiftExtraction.first_octave -1 '
         f'--SiftExtraction.peak_threshold {settings["peak"]} '
         f'--SiftExtraction.num_octaves {settings["octaves"]} '
@@ -385,11 +385,11 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     match_cmd = (
         f'{colmap_cmd} {matcher_type} '
         f'--database_path "{database_path}" '
-        f'--FeatureMatching.use_gpu 1 '
-        f'--FeatureMatching.gpu_index 0,1 '
-        f'--FeatureMatching.num_threads {num_threads} '
+        f'--SiftMatching.use_gpu 1 '
+        f'--SiftMatching.gpu_index 0,1 '
+        f'--SiftMatching.num_threads {num_threads} '
         f'--SiftMatching.max_ratio {settings["match_ratio"]} '
-        f'--FeatureMatching.max_num_matches {max_matches}'
+        f'--SiftMatching.max_num_matches {max_matches}'
     )
     log_progress(f"[MATCH] Max matches per pair: {max_matches}", "INFO")
     log_progress(f"[CPU] Using {num_threads} threads for matching", "INFO")
@@ -422,7 +422,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     
     # Expert mode: add guided matching
     if settings.get('expert', False) and settings.get('guided_matching', False):
-        match_cmd += ' --FeatureMatching.guided_matching 1'
+        match_cmd += ' --SiftMatching.guided_matching 1'
         log_progress("[EXPERT] Guided matching: ENABLED", "INFO")
     
     # Named commands with descriptions for better logging
@@ -731,9 +731,8 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                         f'{colmap_cmd} patch_match_stereo '
                         f'--workspace_path "{parent_dir}" '
                         f'--workspace_format COLMAP '
-                        f'--PatchMatchStereo.geom_consistency true '
-                        f'--PatchMatchStereo.gpu_index 0,1 '
-                        f'--PatchMatchStereo.num_threads {num_threads} '
+                        f'--PatchMatchStereo.geom_consistency 1 '
+                        f'--PatchMatchStereo.gpu_index -1 '
                         f'--PatchMatchStereo.window_radius {mvs_window} '
                         f'--PatchMatchStereo.num_iterations {mvs_iters} '
                         f'--PatchMatchStereo.num_samples {mvs_samples} '

@@ -44,7 +44,7 @@ def check_mlsharp_availability():
     """Check if ml-sharp is installed and get version"""
     global mlsharp_available, mlsharp_version
     try:
-        result = subprocess.run(['sharp', '--help'], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(['sharp', '--help'], capture_output=True, text=True, timeout=30)
         if result.returncode in (0, 2):  # --help exits 0 or 2 depending on CLI framework
             mlsharp_available = True
             mlsharp_version = "ml-sharp 0.1"
@@ -736,7 +736,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 
                 # Run Brush training
                 # Scale timeout based on training steps (roughly 1 minute per 3000 steps, plus buffer)
-                timeout_seconds = max(3600, (training_steps // 3000) * 60 + 1800)  # Minimum 1 hour
+                timeout_seconds = max(7200, (training_steps // 500) * 60 + 3600)  # ~2min per 1000 steps + 1h buffer
                 add_log(f"Brush timeout set to {timeout_seconds // 60} minutes for {training_steps} steps", "DEBUG")
                 
                 add_log(f"Brush pinned to GPU {job_gpu} via CUDA_VISIBLE_DEVICES", "INFO")
@@ -1622,5 +1622,5 @@ if __name__ == '__main__':
     if mlsharp_available:
         add_log(f"ML-Sharp version: {mlsharp_version}", "INFO")
 
-    app.run(debug=True, host='0.0.0.0', port=5000, use_debugger=False)
+    app.run(debug=True, host='0.0.0.0', port=5000, use_debugger=False, use_reloader=False)
 
