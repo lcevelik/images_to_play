@@ -1,0 +1,14 @@
+{
+  "features": 32768,
+  "peak": 0.004,
+  "tracks": 500000,
+  "octaves": 5,
+  "tri_angle": 0.1,
+  "reproj_error": 24.0,
+  "match_ratio": 0.92,
+  "dense": true,
+  "mvs_window_radius": 5,
+  "mvs_iterations": 5,
+  "mvs_samples": 15,
+  "description": "Balanced Quality - Dense enabled, ~500K-2M points, ~5-15 min"
+}

@@ -1,0 +1,18 @@
+{
+  "features": 0,
+  "peak": 0.0001,
+  "tracks": 10000000,
+  "octaves": 8,
+  "tri_angle": 0.01,
+  "reproj_error": 64.0,
+  "match_ratio": 0.98,
+  "ba_max_points": 10000000,
+  "tri_complete_error": 64.0,
+  "tri_merge_error": 64.0,
+  "dense": true,
+  "mvs_window_radius": 7,
+  "mvs_iterations": 10,
+  "mvs_samples": 25,
+  "force_quality": true,
+  "description": "Maximum Quality - Dense + Quality Mode, 5M-50M+ points, ~20-60 min"
+}

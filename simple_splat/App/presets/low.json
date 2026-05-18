@@ -1,0 +1,11 @@
+{
+  "features": 16384,
+  "peak": 0.006,
+  "tracks": 200000,
+  "octaves": 4,
+  "tri_angle": 0.25,
+  "reproj_error": 16.0,
+  "match_ratio": 0.9,
+  "dense": false,
+  "description": "Fast Preview - Sparse only, ~50K-200K points, ~2-5 min"
+}

@@ -1,0 +1,11 @@
+{
+  "features": 0,
+  "peak": 0.0001,
+  "tracks": 5000000,
+  "octaves": 8,
+  "tri_angle": 0.005,
+  "reproj_error": 96.0,
+  "match_ratio": 0.99,
+  "dense": true,
+  "description": "Insane Quality - Maximum permissive settings"
+}

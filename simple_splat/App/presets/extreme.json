@@ -1,0 +1,11 @@
+{
+  "features": 100000,
+  "peak": 0.0005,
+  "tracks": 1000000,
+  "octaves": 7,
+  "tri_angle": 0.02,
+  "reproj_error": 48.0,
+  "match_ratio": 0.97,
+  "dense": true,
+  "description": "Extreme Quality - 100K features"
+}

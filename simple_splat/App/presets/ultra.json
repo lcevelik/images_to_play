@@ -1,0 +1,11 @@
+{
+  "features": 65536,
+  "peak": 0.001,
+  "tracks": 500000,
+  "octaves": 6,
+  "tri_angle": 0.05,
+  "reproj_error": 32.0,
+  "match_ratio": 0.95,
+  "dense": true,
+  "description": "Ultra Quality - 65K features, dense enabled"
+}

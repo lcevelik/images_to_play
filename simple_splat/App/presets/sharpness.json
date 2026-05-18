@@ -1,0 +1,19 @@
+{
+  "features": 0,
+  "peak": 0.00005,
+  "tracks": 20000000,
+  "octaves": 8,
+  "tri_angle": 0.005,
+  "reproj_error": 128.0,
+  "match_ratio": 0.995,
+  "ba_max_points": 20000000,
+  "tri_complete_error": 96.0,
+  "tri_merge_error": 96.0,
+  "dense": true,
+  "ultra_sharpness": true,
+  "mvs_window_radius": 11,
+  "mvs_iterations": 20,
+  "mvs_samples": 40,
+  "force_quality": true,
+  "description": "Maximum Sharpness - Ultra MVS + 200K steps recommended"
+}

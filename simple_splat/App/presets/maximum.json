@@ -1,0 +1,11 @@
+{
+  "features": 0,
+  "peak": 0.0002,
+  "tracks": 2000000,
+  "octaves": 8,
+  "tri_angle": 0.01,
+  "reproj_error": 64.0,
+  "match_ratio": 0.98,
+  "dense": true,
+  "description": "Maximum Quality - Unlimited features"
+}
