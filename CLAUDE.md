@@ -30,11 +30,19 @@ ML-Sharp detection (`sharp --help`) has a 30-second timeout because PyTorch take
 
 ### COLMAP flag compatibility
 
-The installed COLMAP is **3.9.1**. It uses `SiftExtraction.*` and `SiftMatching.*` namespaces — not `FeatureExtraction.*` / `FeatureMatching.*` (which are a newer unreleased version). Always use:
-- `--SiftExtraction.use_gpu`, `--SiftExtraction.gpu_index`, `--SiftExtraction.num_threads`
-- `--SiftMatching.use_gpu`, `--SiftMatching.gpu_index`, `--SiftMatching.num_threads`, `--SiftMatching.max_num_matches`, `--SiftMatching.guided_matching`
+The installed COLMAP is **4.1.0** (from the 4.0.4 release tag). In 4.x the namespaces split:
+- GPU/thread/general options → `FeatureExtraction.*` and `FeatureMatching.*`
+- SIFT algorithm tuning → `SiftExtraction.*` and `SiftMatching.*`
 
-COLMAP lives at `C:\COLMAP\bin\colmap.exe` and requires `C:\COLMAP\lib` in PATH for DLL loading. The app adds this to `os.environ["PATH"]` at startup. Run COLMAP via subprocess with `shell=True` or explicitly set PATH in the env dict.
+Always use:
+- `--FeatureExtraction.use_gpu`, `--FeatureExtraction.gpu_index -1`, `--FeatureExtraction.num_threads`, `--FeatureExtraction.max_image_size`
+- `--SiftExtraction.max_num_features`, `--SiftExtraction.peak_threshold`, `--SiftExtraction.num_octaves`, `--SiftExtraction.first_octave`, `--SiftExtraction.edge_threshold`
+- `--FeatureMatching.use_gpu`, `--FeatureMatching.gpu_index -1`, `--FeatureMatching.num_threads`, `--FeatureMatching.max_num_matches`, `--FeatureMatching.guided_matching`
+- `--SiftMatching.max_ratio`
+
+GLOMAP is now built into COLMAP 4.x as `colmap global_mapper` — no separate binary needed. Flags use `GlobalMapper.*` namespace.
+
+COLMAP lives at `C:\COLMAP\bin\colmap.exe`. All DLLs are bundled in `bin/` (4.x no longer needs a separate `lib/`). The app adds `C:\COLMAP\bin` to `os.environ["PATH"]` at startup.
 
 ### Processing pipeline architecture
 
@@ -67,7 +75,7 @@ simple_splat/App/processing/<uuid>/
 |--------|----------|----------|
 | COLMAP | `C:\COLMAP\bin\colmap.exe` | Yes |
 | Brush | `simple_splat\Brush\brush_app.exe` | No (falls back to sparse PLY) |
-| GLOMAP | `C:\COLMAP\bin\glomap.exe` | No (falls back to COLMAP mapper) |
+| GLOMAP | built into COLMAP 4.x as `colmap global_mapper` | No (falls back to incremental mapper) |
 | sharp (ML-Sharp) | in PATH via pip install | No (feature disabled if absent) |
 
 ### Python dependencies
