@@ -743,12 +743,12 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                         f'--workspace_path "{parent_dir}" '
                         f'--workspace_format COLMAP '
                         f'--PatchMatchStereo.geom_consistency 1 '
-                        f'--PatchMatchStereo.gpu_index -1 '
+                        f'--PatchMatchStereo.gpu_index 0 '
                         f'--PatchMatchStereo.window_radius {mvs_window} '
                         f'--PatchMatchStereo.num_iterations {mvs_iters} '
                         f'--PatchMatchStereo.num_samples {mvs_samples} '
                         f'--PatchMatchStereo.filter_min_ncc {mvs_filter_ncc} '
-                        f'--PatchMatchStereo.cache_size 32'
+                        f'--PatchMatchStereo.cache_size 44000'
                     )
                     
                     log_progress(f"[MVS] Window radius: {mvs_window}, Iterations: {mvs_iters}, Samples: {mvs_samples}", "INFO")
@@ -844,13 +844,13 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                                 f'{colmap_cmd} patch_match_stereo '
                                 f'--workspace_path "{parent_dir}" '
                                 f'--workspace_format COLMAP '
-                                f'--PatchMatchStereo.gpu_index -1 '
+                                f'--PatchMatchStereo.gpu_index 0 '
                                 f'--PatchMatchStereo.geom_consistency 0 '
                                 f'--PatchMatchStereo.window_radius {fallback_window} '
                                 f'--PatchMatchStereo.num_iterations {fallback_iters} '
                                 f'--PatchMatchStereo.num_samples {fallback_samples} '
                                 f'--PatchMatchStereo.filter_min_ncc {mvs_filter_ncc} '
-                                f'--PatchMatchStereo.cache_size 16'
+                                f'--PatchMatchStereo.cache_size 44000'
                             )
                             
                             log_file.write(f"Fallback command: {patch_match_fallback}\n")
