@@ -1,4 +1,6 @@
 import os
+import json
+import pathlib
 import subprocess
 import argparse
 import time
@@ -8,8 +10,18 @@ import threading
 from shutil import copy2, move, rmtree
 
 # Thread-local storage for progress callbacks (thread-safe for concurrent jobs)
-import threading
 _thread_local = threading.local()
+
+def _load_presets():
+    """Load preset JSON files from presets/ directory. Returns dict or None if not found."""
+    preset_dir = pathlib.Path(__file__).parent / "presets"
+    if not preset_dir.exists():
+        return None
+    presets = {}
+    for f in sorted(preset_dir.glob("*.json")):
+        with open(f) as fp:
+            presets[f.stem] = json.load(fp)
+    return presets if presets else None
 
 def set_progress_callback(callback):
     """Set a callback function for real-time progress updates (thread-safe)"""
@@ -56,7 +68,10 @@ def filter_images(image_path, interval):
         return input_folder
     return image_path
 
-def run_colmap(image_path, matcher_type, interval, model_type, detail_level='medium', quality_mode=False, ultra_sharpness_mode=False):
+def run_colmap(image_path, matcher_type, interval, model_type, detail_level='medium', quality_mode=False, ultra_sharpness_mode=False, enable_dense_override=None):
+    # Load presets from JSON files, fall back to inline dict if not found
+    _json_presets = _load_presets()
+
     # Simplified preset system - 3 main presets plus legacy compatibility
     # LOW: Fast preview (sparse only, minimal features)
     # MEDIUM: Balanced quality (dense enabled, good features)
@@ -105,16 +120,11 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             'dense': True,
             'description': 'Extreme Quality - 100K features'
         },
-        'maximum': {
-            'features': 0, 'peak': 0.0002, 'tracks': 2000000, 'octaves': 8,
-            'tri_angle': 0.01, 'reproj_error': 64.0, 'match_ratio': 0.98,
-            'dense': True,
-            'description': 'Maximum Quality - Unlimited features'
-        },
         'insane': {
             'features': 0, 'peak': 0.0001, 'tracks': 5000000, 'octaves': 8,
             'tri_angle': 0.005, 'reproj_error': 96.0, 'match_ratio': 0.99,
             'dense': True,
+            'mvs_window_radius': 7, 'mvs_iterations': 10, 'mvs_samples': 25,
             'description': 'Insane Quality - Maximum permissive settings'
         },
         'unlimited': {
@@ -124,18 +134,10 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             'dense': True,
             'description': 'Unlimited - All features, maximum points'
         },
-        'dense': {
-            'features': 0, 'peak': 0.00001, 'tracks': 10000000, 'octaves': 8,
-            'tri_angle': 0.001, 'reproj_error': 128.0, 'match_ratio': 0.999,
-            'ba_max_points': 10000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
-            'dense': True,
-            'expert': False,
-            'description': 'Dense MVS - Full dense reconstruction'
-        },
         'expert': {
-            'features': 0, 'peak': 0.000005, 'tracks': 50000000, 'octaves': 10,
-            'tri_angle': 0.0001, 'reproj_error': 256.0, 'match_ratio': 0.9999,
-            'ba_max_points': 50000000, 'tri_complete_error': 128.0, 'tri_merge_error': 128.0,
+            'features': 0, 'peak': 0.000005, 'tracks': 50000000, 'octaves': 8,
+            'tri_angle': 0.01, 'reproj_error': 128.0, 'match_ratio': 0.99,
+            'ba_max_points': 50000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
             'dense': True,
             'expert': True,
             'domain_size_pooling': True,
@@ -164,7 +166,14 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             'description': '🔥 Maximum Sharpness - Ultra MVS + 200K steps recommended'
         },
     }
+    # Use JSON presets if available, fall back to inline dict
+    detail_settings = _json_presets if _json_presets else detail_settings
     settings = detail_settings.get(detail_level, detail_settings['medium'])
+
+    # Apply dense override if specified
+    if enable_dense_override is not None:
+        settings = dict(settings)
+        settings['dense'] = enable_dense_override
 
     # Force quality mode for 'high' preset
     if settings.get('force_quality', False):
@@ -235,17 +244,19 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     bundled_colmap_lib = os.path.join(project_root, 'COLMAP', 'lib')
     bundled_colmap_bin_dir = os.path.join(project_root, 'COLMAP', 'bin')
     bundled_colmap_bin = os.path.join(bundled_colmap_bin_dir, 'colmap.exe')
-    if os.path.exists(bundled_colmap_bin_dir):
-        os.environ["PATH"] = bundled_colmap_bin_dir + ";" + os.environ.get("PATH", "")
-    if os.path.exists(bundled_colmap_lib):
+    _current_path = os.environ.get("PATH", "")
+    if os.path.exists(bundled_colmap_bin_dir) and bundled_colmap_bin_dir not in _current_path:
+        os.environ["PATH"] = bundled_colmap_bin_dir + ";" + _current_path
+    if os.path.exists(bundled_colmap_lib) and bundled_colmap_lib not in _current_path:
         os.environ["PATH"] = bundled_colmap_lib + ";" + os.environ.get("PATH", "")
 
     # Also add system COLMAP bin/lib folders if present
     colmap_bin_dir = r"C:\COLMAP\bin"
     colmap_lib = r"C:\COLMAP\lib"
-    if os.path.exists(colmap_bin_dir):
-        os.environ["PATH"] = colmap_bin_dir + ";" + os.environ.get("PATH", "")
-    if os.path.exists(colmap_lib):
+    _current_path = os.environ.get("PATH", "")
+    if os.path.exists(colmap_bin_dir) and colmap_bin_dir not in _current_path:
+        os.environ["PATH"] = colmap_bin_dir + ";" + _current_path
+    if os.path.exists(colmap_lib) and colmap_lib not in _current_path:
         os.environ["PATH"] = colmap_lib + ";" + os.environ.get("PATH", "")
 
     # Find COLMAP path first (will be used in all commands)
@@ -380,7 +391,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     # Matching settings - GPU accelerated, configurable based on detail level
     # Higher max_ratio = more matches kept (less strict filtering)
     # Lower max_num_matches to prevent GPU OOM with high feature counts
-    max_matches = 16384 if settings['features'] == 0 or settings['features'] > 50000 else 32768
+    max_matches = 32768 if settings['features'] == 0 or settings['features'] > 50000 else 16384
 
     match_cmd = (
         f'{colmap_cmd} {matcher_type} '
@@ -488,7 +499,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             try:
                 total_images = len([f for f in os.listdir(image_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
                 log_progress(f"  [INFO] Processing {total_images} images...", "INFO")
-            except:
+            except Exception:
                 pass
             
             for line in iter(process.stdout.readline, ''):
@@ -813,6 +824,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                     
                     pm_returncode = pm_process.returncode
                     pm_time = time.time() - pm_start
+                    log_progress(f"  [MVS] Patch match stereo completed ({pm_time:.1f}s)", "INFO")
                     
                     if pm_returncode != 0:
                         # Error code 3221226505 = Windows DLL/crash error (often GPU/CUDA related)
@@ -882,7 +894,8 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                             log_progress(f"[QUALITY MODE] Fusion: min_pixels={fusion_min_pixels}, max_reproj={fusion_max_reproj}", "INFO")
                         
                         fusion_start = time.time()
-                        
+                        log_progress("  [Fusion] Starting stereo fusion (may take several minutes)...", "INFO")
+
                         # Stream fusion output for progress
                         fusion_process = subprocess.Popen(
                             fusion_cmd, shell=True,

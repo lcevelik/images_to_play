@@ -7,5 +7,8 @@
   "reproj_error": 96.0,
   "match_ratio": 0.99,
   "dense": true,
+  "mvs_window_radius": 7,
+  "mvs_iterations": 10,
+  "mvs_samples": 25,
   "description": "Insane Quality - Maximum permissive settings"
 }

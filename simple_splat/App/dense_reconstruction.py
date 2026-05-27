@@ -219,45 +219,6 @@ def run_dense_reconstruction(parent_dir, image_path, sparse_path, enable_dense=T
         return None
 
 
-def run_poisson_reconstruction(dense_ply_path, output_path, depth=10, colmap_path='colmap'):
-    """
-    Optional: Run Poisson surface reconstruction on dense point cloud
-    Creates a mesh from the point cloud
-
-    Args:
-        dense_ply_path: Path to dense point cloud
-        output_path: Output path for mesh
-        depth: Octree depth (higher = more detail, default 10)
-        colmap_path: Path to COLMAP executable (defaults to 'colmap' in PATH)
-
-    Returns:
-        Path to mesh file or None if failed
-    """
-
-    if not os.path.exists(dense_ply_path):
-        print(f"ERROR: Dense PLY not found at {dense_ply_path}")
-        return None
-
-    print(f"\n[Optional] Running Poisson reconstruction (depth={depth})...")
-
-    poisson_cmd = (
-        f'"{colmap_path}" poisson_mesher '
-        f'--input_path "{dense_ply_path}" '
-        f'--output_path "{output_path}" '
-        f'--PoissonMeshing.depth {depth} '
-        f'--PoissonMeshing.trim 7'
-    )
-
-    result = subprocess.run(poisson_cmd, shell=True, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(f"Poisson reconstruction failed: {result.stderr}")
-        return None
-
-    print(f"✓ Mesh generated: {output_path}")
-    return output_path
-
-
 if __name__ == "__main__":
     """
     Test the dense reconstruction module standalone

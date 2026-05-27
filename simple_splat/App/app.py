@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import uuid
 import zipfile
@@ -19,6 +20,54 @@ import json
 from datetime import datetime
 from collections import deque
 import time
+import numpy as np
+
+# Image processing constants
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
+
+def resize_images_for_colmap(image_folder, max_size=3840):
+    """Downscale images larger than max_size to save COLMAP time.
+    4K images slow COLMAP 16x vs 2K. Returns count of resized images."""
+    from PIL import Image
+    resized = 0
+    for fname in os.listdir(image_folder):
+        if not fname.lower().endswith(IMAGE_EXTENSIONS):
+            continue
+        fpath = os.path.join(image_folder, fname)
+        try:
+            img = Image.open(fpath)
+            w, h = img.size
+            if max(w, h) > max_size:
+                scale = max_size / max(w, h)
+                img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                img.save(fpath, quality=95)
+                resized += 1
+        except Exception:
+            continue
+    return resized
+
+def filter_blurry_images(image_folder, blur_threshold=100.0):
+    """Detect blurry images using Laplacian variance. Returns list of (filename, score).
+    Does NOT delete images — just reports for logging."""
+    try:
+        import cv2
+    except ImportError:
+        return []
+    blurry = []
+    for fname in os.listdir(image_folder):
+        if not fname.lower().endswith(IMAGE_EXTENSIONS):
+            continue
+        fpath = os.path.join(image_folder, fname)
+        try:
+            img = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            score = cv2.Laplacian(img, cv2.CV_64F).var()
+            if score < blur_threshold:
+                blurry.append((fname, score))
+        except Exception:
+            continue
+    return blurry
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -115,6 +164,23 @@ def set_current_job(job_id):
 def get_current_job():
     """Get the current job ID for this thread"""
     return getattr(_current_job, 'job_id', None)
+
+def transition_stage(processing_status, job_id, new_stage):
+    """Transition to a new pipeline stage, recording elapsed time for the previous one."""
+    ps = processing_status[job_id]
+    old_stage = ps.get('stage')
+    now = time.time()
+    # Close out the old stage
+    if old_stage and old_stage in ps.get('stages', {}):
+        stage_info = ps['stages'][old_stage]
+        if stage_info['status'] == 'running' and stage_info.get('started_at'):
+            stage_info['elapsed'] = now - stage_info['started_at']
+            stage_info['status'] = 'complete'
+    # Start the new stage
+    if new_stage in ps.get('stages', {}):
+        ps['stages'][new_stage]['status'] = 'running'
+        ps['stages'][new_stage]['started_at'] = now
+    ps['stage'] = new_stage
 
 def add_log(message, level="INFO"):
     """Add a log entry to the global buffer and job-specific buffer if available"""
@@ -319,7 +385,7 @@ def extract_zip(zip_path, extract_to):
         zip_ref.extractall(extract_to)
     return extract_to
 
-def process_images_async(job_id, image_path, preset='medium', matcher_type='exhaustive_matcher', interval=1, advanced_settings=None):
+def process_images_async(job_id, image_path, preset='medium', matcher_type='exhaustive_matcher', interval=1, advanced_settings=None, quality_scale=1.0, trainer='brush'):
     """Process images using COLMAP/GLOMAP pipeline with optional dense reconstruction"""
     try:
         # Preset configuration - maps simple presets to detailed settings
@@ -345,21 +411,71 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 'training_steps': 30000,
                 'enable_dense': True,
                 'max_image_size': 4800,
-                'quality_mode': True,  # Auto-enable quality mode for high preset
+                'quality_mode': True,
                 'description': 'Maximum Quality - Dense + Quality Mode, 5M-50M+ points, ~20-60 min'
+            },
+            'ultra': {
+                'detail_level': 'ultra',
+                'training_steps': 50000,
+                'enable_dense': True,
+                'max_image_size': 4800,
+                'quality_mode': True,
+                'description': 'Ultra Quality - 65K features, dense enabled'
+            },
+            'extreme': {
+                'detail_level': 'extreme',
+                'training_steps': 80000,
+                'enable_dense': True,
+                'max_image_size': 4800,
+                'quality_mode': True,
+                'description': 'Extreme Quality - 100K features'
+            },
+            'insane': {
+                'detail_level': 'insane',
+                'training_steps': 150000,
+                'enable_dense': True,
+                'max_image_size': 4800,
+                'quality_mode': True,
+                'description': 'Insane Quality - Maximum permissive settings'
+            },
+            'unlimited': {
+                'detail_level': 'unlimited',
+                'training_steps': 200000,
+                'enable_dense': True,
+                'max_image_size': 4800,
+                'quality_mode': True,
+                'description': 'Unlimited - All features, maximum points'
+            },
+            'expert': {
+                'detail_level': 'expert',
+                'training_steps': 200000,
+                'enable_dense': True,
+                'max_image_size': 8192,
+                'quality_mode': True,
+                'description': 'Expert - All advanced features enabled'
+            },
+            'sharpness': {
+                'detail_level': 'sharpness',
+                'training_steps': 200000,
+                'enable_dense': True,
+                'max_image_size': 4800,
+                'quality_mode': True,
+                'description': 'Maximum Sharpness - Ultra MVS + 200K steps'
             }
         }
 
         # Get preset config or default to medium
         config = preset_configs.get(preset, preset_configs['medium'])
+        config['quality_scale'] = quality_scale
+        config['trainer'] = trainer
 
-        # Allow advanced settings to override preset
+        # Allow advanced settings to override preset (skip None values to preserve preset defaults)
         if advanced_settings:
-            config.update(advanced_settings)
+            config.update({k: v for k, v in advanced_settings.items() if v is not None})
 
         # Extract final settings
         detail_level = config['detail_level']
-        training_steps = config['training_steps']
+        training_steps = int(config['training_steps'] * quality_scale)
         enable_dense = config['enable_dense']
         max_image_size = config['max_image_size']
         quality_mode = config['quality_mode']
@@ -368,11 +484,20 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         processing_status[job_id] = {
             'status': 'processing',
             'step': 'Initializing...',
+            'stage': 'initialization',
             'progress': 0,
             'error': None,
-            'logs': deque(maxlen=200),  # Job-specific log buffer
+            'logs': deque(maxlen=200),
             'preset': preset,
-            'config': config
+            'config': config,
+            'started_at': time.time(),
+            'stages': {
+                'feature_extraction': {'status': 'pending', 'started_at': None, 'elapsed': None},
+                'feature_matching': {'status': 'pending', 'started_at': None, 'elapsed': None},
+                'mapping': {'status': 'pending', 'started_at': None, 'elapsed': None},
+                'dense_mvs': {'status': 'pending', 'started_at': None, 'elapsed': None},
+                'training': {'status': 'pending', 'started_at': None, 'elapsed': None},
+            }
         }
 
         # Assign a GPU to this job (for Brush and ML-Sharp)
@@ -386,7 +511,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         add_log(f"Preset: {preset.upper()} - {config.get('description', 'Custom settings')}", "INFO")
         add_log(f"Image path: {image_path}", "INFO")
         add_log(f"Matcher type: {matcher_type}", "INFO")
-        add_log(f"Training steps: {training_steps:,}", "INFO")
+        add_log(f"Training steps: {training_steps:,}" if training_steps else f"Training steps: preset default", "INFO")
         if config.get('sharpness_boost'):
             add_log(f"[SHARPNESS] ULTRA SHARPNESS BOOST ENABLED - Maximum MVS quality!", "INFO")
         if quality_mode:
@@ -397,17 +522,22 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         add_log(f"Found {len(image_files)} images to process", "INFO")
         
         # Import and run the glomap processing
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from run_glomap import run_colmap, set_progress_callback
         
         # Set up progress callback to route COLMAP logs to our log system
         def colmap_progress_callback(message, level):
             add_log(message, level)
+            # Detect stage transitions from COLMAP log messages
+            if "STEP 2" in message or "Feature Matching" in message or "matching" in message.lower():
+                transition_stage(processing_status, job_id, 'feature_matching')
+            elif "STEP 3" in message or "Mapper" in message or "Reconstructing" in message or "triangulating" in message.lower():
+                transition_stage(processing_status, job_id, 'mapping')
+            elif "STEP 4" in message or "PatchMatch" in message or "MVS" in message or "dense" in message.lower():
+                transition_stage(processing_status, job_id, 'dense_mvs')
             # Update status step with latest progress message
             if "Step" in message or "Processing" in message or "Matching" in message or "Registered" in message:
                 processing_status[job_id]['step'] = message.replace("=", "").strip()
-        
+
         set_progress_callback(colmap_progress_callback)
         
         # Check for COLMAP before starting - try multiple paths
@@ -419,9 +549,10 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         _bundled_colmap_bin_dir = os.path.join(_project_root, 'COLMAP', 'bin')
         _bundled_colmap_lib = os.path.join(_project_root, 'COLMAP', 'lib')
         _bundled_colmap_bin = os.path.join(_bundled_colmap_bin_dir, 'colmap.exe')
-        if os.path.exists(_bundled_colmap_bin_dir):
-            os.environ["PATH"] = _bundled_colmap_bin_dir + ";" + os.environ.get("PATH", "")
-        if os.path.exists(_bundled_colmap_lib):
+        _current_path = os.environ.get("PATH", "")
+        if os.path.exists(_bundled_colmap_bin_dir) and _bundled_colmap_bin_dir not in _current_path:
+            os.environ["PATH"] = _bundled_colmap_bin_dir + ";" + _current_path
+        if os.path.exists(_bundled_colmap_lib) and _bundled_colmap_lib not in _current_path:
             os.environ["PATH"] = _bundled_colmap_lib + ";" + os.environ.get("PATH", "")
 
         # Try to find COLMAP - check PATH first, then common installation locations
@@ -436,10 +567,23 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         # Also add system COLMAP bin/lib folders to PATH if present
         colmap_bin_dir = r"C:\COLMAP\bin"
         colmap_lib = r"C:\COLMAP\lib"
-        if os.path.exists(colmap_bin_dir):
-            os.environ["PATH"] = colmap_bin_dir + ";" + os.environ.get("PATH", "")
-        if os.path.exists(colmap_lib):
+        _current_path = os.environ.get("PATH", "")
+        if os.path.exists(colmap_bin_dir) and colmap_bin_dir not in _current_path:
+            os.environ["PATH"] = colmap_bin_dir + ";" + _current_path
+        if os.path.exists(colmap_lib) and colmap_lib not in _current_path:
             os.environ["PATH"] = colmap_lib + ";" + os.environ.get("PATH", "")
+
+        # Add MSVC cl.exe to PATH for gsplat JIT CUDA kernel compilation
+        _msvc_bin = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"
+        if os.path.exists(_msvc_bin):
+            _msvc_versions = sorted(os.listdir(_msvc_bin), reverse=True)
+            for _v in _msvc_versions:
+                _cl_dir = os.path.join(_msvc_bin, _v, "bin", "Hostx64", "x64")
+                if os.path.exists(os.path.join(_cl_dir, "cl.exe")):
+                    if _cl_dir not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = _cl_dir + ";" + os.environ.get("PATH", "")
+                    add_log(f"MSVC cl.exe found at: {_cl_dir}", "INFO")
+                    break
 
         for path in possible_paths:
             try:
@@ -467,22 +611,38 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             add_log("global_mapper not available - using COLMAP incremental mapper", "WARNING")
 
         processing_status[job_id]['step'] = 'Running COLMAP feature extraction...'
+        transition_stage(processing_status, job_id, 'feature_extraction')
         processing_status[job_id]['progress'] = 20
 
         add_log("=" * 50, "INFO")
         add_log("STEP 1: Running COLMAP/GLOMAP Pipeline", "INFO")
         add_log("=" * 50, "INFO")
         add_log("Hardware: COLMAP auto-detects GPU/CPU (uses CUDA if available)", "INFO")
-        
+
+        # Pre-process images: resize large images and detect blurry ones
+        max_image_size = config.get('max_image_size', 3840)
+        if max_image_size and max_image_size > 0:
+            resized = resize_images_for_colmap(image_path, max_size=max_image_size)
+            if resized > 0:
+                add_log(f"Resized {resized} images to max {max_image_size}px", "INFO")
+
+        blurry = filter_blurry_images(image_path, blur_threshold=100.0)
+        if blurry:
+            add_log(f"Warning: {len(blurry)} potentially blurry images detected", "WARNING")
+            for fname, score in blurry[:5]:
+                add_log(f"  - {fname} (blur score: {score:.1f})", "WARNING")
+
         # Determine ultra_sharpness mode from config
         mvs_mode = config.get('mvs_quality_mode', 'balanced')
         ultra_sharpness_enabled = config.get('sharpness_boost', False) or (mvs_mode == 'ultra_sharpness')
-        
+
         # Run COLMAP/GLOMAP processing
-        run_colmap(image_path, matcher_type, interval, '3dgs', detail_level, quality_mode, ultra_sharpness_enabled)
+        # Pass enable_dense as override to run_colmap (preset's dense setting can be overridden by user)
+        run_colmap(image_path, matcher_type, interval, '3dgs', detail_level, quality_mode, ultra_sharpness_enabled, enable_dense_override=enable_dense)
         
         add_log("COLMAP processing complete!", "INFO")
         processing_status[job_id]['step'] = 'COLMAP processing complete. Preparing for Gaussian Splat training...'
+        transition_stage(processing_status, job_id, 'training')
         processing_status[job_id]['progress'] = 50
         
         # Check if sparse reconstruction exists
@@ -600,199 +760,213 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             add_log("Dense reconstruction disabled, using sparse points only", "INFO")
 
         add_log("=" * 50, "INFO")
-        add_log("STEP 3: Training Gaussian Splats with Brush", "INFO")
-        add_log("=" * 50, "INFO")
-        
-        processing_status[job_id]['step'] = 'Training Gaussian Splats with Brush...'
-        processing_status[job_id]['progress'] = 60
-        
-        # Check if Brush is available - try multiple installation locations
-        _app_dir_brush = os.path.dirname(os.path.abspath(__file__))
-        _project_root_brush = os.path.dirname(_app_dir_brush)
-        _bundled_brush = os.path.join(_project_root_brush, 'Brush', 'brush_app.exe')
-        brush_paths = [
-            _bundled_brush,           # Bundled Brush (highest priority)
-            r"C:\Brush\brush_app.exe",
-            r"C:\Brush\brush.exe",
-            "brush_app",  # Check PATH
-            "brush",      # Check PATH
-        ]
-        
-        brush_path = None
-        for path in brush_paths:
-            if os.path.isabs(path) and os.path.exists(path):
-                brush_path = path
-                break
-            else:
-                # Check if in system PATH
-                found = shutil.which(path)
-                if found:
-                    brush_path = found
-                    break
-        
-        brush_available = brush_path is not None
-        if brush_available:
-            add_log(f"Brush found at: {brush_path}", "INFO")
+        trainer_type = config.get('trainer', 'brush')
+        if trainer_type == 'gsplat_mcmc':
+            add_log("STEP 3: Training Gaussian Splats with gsplat MCMC", "INFO")
+            processing_status[job_id]['step'] = 'Training with gsplat MCMC...'
         else:
-            add_log("Brush not found - will generate PLY from sparse reconstruction", "INFO")
-        
+            add_log("STEP 3: Training Gaussian Splats with Brush", "INFO")
+            processing_status[job_id]['step'] = 'Training Gaussian Splats with Brush...'
+        add_log("=" * 50, "INFO")
+        processing_status[job_id]['progress'] = 60
+
+        # Branch: gsplat MCMC trainer or Brush
         output_ply = None
         ply_generated = False
-        
-        if brush_available:
-            try:
-                # Brush expects images in a folder called "images"
-                images_folder = os.path.join(parent_dir, 'images')
-                source_folder = os.path.join(parent_dir, 'source')
-                input_folder = os.path.join(parent_dir, 'input')
-                
-                # Count images in each folder
-                def count_images(folder):
-                    if os.path.exists(folder):
-                        return len([f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-                    return 0
-                
-                images_count = count_images(images_folder)
-                source_count = count_images(source_folder)
-                input_count = count_images(input_folder)
-                
-                add_log(f"Image counts - images: {images_count}, source: {source_count}, input: {input_count}", "DEBUG")
-                
-                # Use the folder with the most images
-                # If 'images' exists but has fewer images than 'source', use source images
-                if source_count > images_count:
-                    add_log(f"Source folder has more images ({source_count} vs {images_count}), copying to images folder", "INFO")
-                    # Remove sparse images folder and use source images instead
-                    if os.path.exists(images_folder):
-                        shutil.rmtree(images_folder)
-                    shutil.copytree(source_folder, images_folder)
-                elif input_count > images_count:
-                    add_log(f"Input folder has more images ({input_count} vs {images_count}), copying to images folder", "INFO")
-                    if os.path.exists(images_folder):
-                        shutil.rmtree(images_folder)
-                    shutil.copytree(input_folder, images_folder)
-                elif not os.path.exists(images_folder):
-                    # No images folder, try to create from source or input
-                    if source_count > 0:
-                        shutil.copytree(source_folder, images_folder)
-                        add_log(f"Created images folder from source ({source_count} images)", "INFO")
-                    elif input_count > 0:
-                        shutil.copytree(input_folder, images_folder)
-                        add_log(f"Created images folder from input ({input_count} images)", "INFO")
-                
-                # Verify images folder exists and has images
-                if os.path.exists(images_folder):
-                    image_files = [f for f in os.listdir(images_folder) 
-                                  if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-                    add_log(f"Found {len(image_files)} images for Brush training", "INFO")
-                else:
-                    add_log(f"Warning: images folder not found at {images_folder}", "WARNING")
-                
-                # Run Brush training
-                add_log(f"Training with {training_steps} steps", "INFO")
-                export_path = parent_dir
-                
-                # Brush expects COLMAP format data
-                # Determine if sharpness boost is enabled for quality adjustments
-                sharpness_boost_enabled = config.get('sharpness_boost', False)
-                
-                # Brush default grad threshold is 0.00004 — lower = more splats/detail
-                grad_threshold = "0.00002" if sharpness_boost_enabled else "0.00004"
-                growth_fraction = "0.15" if sharpness_boost_enabled else "0.1"
-                refine_every = "100" if sharpness_boost_enabled else "150"
-                max_res = "1920" if sharpness_boost_enabled else "1280"
-                
-                brush_cmd = [
-                    brush_path,
-                    parent_dir,  # Path to folder with images/ and sparse/
-                    "--total-steps", str(training_steps),
-                    "--export-path", export_path,
-                    "--export-name", "gaussian_splat.ply",
-                    "--export-every", str(training_steps),  # Export at the end
-                    "--max-resolution", max_res,
-                    "--growth-grad-threshold", grad_threshold,
-                    "--growth-select-fraction", growth_fraction,
-                    "--refine-every", refine_every,
-                ]
 
-                add_log(f"Quality settings: grad_threshold={grad_threshold}", "INFO")
-                
-                add_log(f"Starting Brush training with {training_steps} steps...", "INFO")
-                add_log("Brush GPU: Uses GPU (Vulkan/CUDA) for training automatically", "INFO")
-                add_log(f"Brush command: {' '.join(brush_cmd)}", "DEBUG")
-                add_log(f"Folder contents: {os.listdir(parent_dir)}", "DEBUG")
-                processing_status[job_id]['step'] = f'Training Gaussian Splats (0/{training_steps} steps)...'
-                
-                # Run Brush training
-                # Scale timeout based on training steps (roughly 1 minute per 3000 steps, plus buffer)
-                timeout_seconds = max(7200, (training_steps // 500) * 60 + 3600)  # ~2min per 1000 steps + 1h buffer
-                add_log(f"Brush timeout set to {timeout_seconds // 60} minutes for {training_steps} steps", "DEBUG")
-                
-                add_log(f"Brush pinned to GPU {job_gpu} via CUDA_VISIBLE_DEVICES", "INFO")
-                result = subprocess.run(
-                    brush_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                    env=gpu_env(job_gpu)
+        if trainer_type == 'gsplat_mcmc':
+            try:
+                from gsplat_mcmc_trainer import train_mcmc
+                add_log("Starting gsplat MCMC training...", "INFO")
+                processing_status[job_id]['step'] = 'Training with gsplat MCMC...'
+
+                def gsplat_progress(msg, level="INFO"):
+                    add_log(f"gsplat: {msg}", level)
+                    # Parse step number for progress
+                    m = re.search(r'Step\s+(\d+)/(\d+)', str(msg))
+                    if m:
+                        step = int(m.group(1))
+                        total = int(m.group(2))
+                        pct = min(int(step / total * 90) + 60, 99)
+                        processing_status[job_id]['progress'] = pct
+
+                output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
+                result = train_mcmc(
+                    parent_dir,
+                    total_steps=training_steps,
+                    cap_max=1_500_000,
+                    progress_callback=gsplat_progress,
+                    output_ply_path=output_ply,
                 )
-                
-                # Log Brush output for debugging
-                add_log(f"Brush completed with return code: {result.returncode}", "INFO")
-                if result.stdout:
-                    for line in result.stdout.split('\n')[:20]:
-                        if line.strip():
-                            add_log(f"Brush: {line.strip()}", "DEBUG")
-                if result.stderr:
-                    for line in result.stderr.split('\n')[:10]:
-                        if line.strip():
-                            add_log(f"Brush stderr: {line.strip()}", "WARNING")
-                
-                if result.returncode == 0:
-                    # Look for the exported PLY file - try multiple patterns
-                    possible_plys = [
-                        os.path.join(export_path, f"export_{training_steps}.ply"),
-                        os.path.join(export_path, "gaussian_splat.ply"),
-                        os.path.join(export_path, "splat.ply"),
-                    ]
-                    
-                    # Also check for any export_*.ply files
-                    export_plys = list(Path(export_path).glob('export_*.ply'))
-                    if export_plys:
-                        possible_plys.extend([str(p) for p in export_plys])
-                    
-                    # Find the first existing PLY
-                    found_ply = None
-                    for ply_path in possible_plys:
-                        if os.path.exists(ply_path):
-                            found_ply = ply_path
-                            break
-                    
-                    if found_ply:
-                        output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
-                        if found_ply != output_ply:
-                            shutil.copy(found_ply, output_ply)
-                        ply_generated = True
-                        ply_size = os.path.getsize(output_ply) / (1024 * 1024)  # Size in MB
-                        add_log(f"Brush training complete! Output: {output_ply} ({ply_size:.2f} MB)", "INFO")
-                    else:
-                        add_log(f"Brush completed but no PLY found in {export_path}", "WARNING")
-                        add_log(f"Files in export_path: {os.listdir(export_path)}", "DEBUG")
-                        # Check if there's any .ply file at all
-                        all_plys = list(Path(export_path).glob('*.ply'))
-                        if all_plys:
-                            output_ply = str(all_plys[0])
-                            ply_generated = True
-                            add_log(f"Found PLY file: {output_ply}", "INFO")
+                if result and os.path.exists(result):
+                    ply_generated = True
+                    add_log(f"gsplat MCMC training complete! Output: {result}", "INFO")
                 else:
-                    add_log(f"Brush training failed with code {result.returncode}", "ERROR")
-                    add_log(f"STDERR: {result.stderr[:500] if result.stderr else 'empty'}", "ERROR")
-                    
-            except subprocess.TimeoutExpired:
-                print("Brush training timed out")
+                    add_log("gsplat MCMC training failed — falling back to Brush", "WARNING")
+                    trainer_type = 'brush'  # fall through to Brush
             except Exception as e:
-                print(f"Error running Brush: {e}")
-        
+                add_log(f"gsplat MCMC error: {e} — falling back to Brush", "WARNING")
+                trainer_type = 'brush'  # fall through to Brush
+
+        if trainer_type == 'brush' and not ply_generated:
+            # Check if Brush is available - try multiple installation locations
+            _app_dir_brush = os.path.dirname(os.path.abspath(__file__))
+            _project_root_brush = os.path.dirname(_app_dir_brush)
+            _bundled_brush = os.path.join(_project_root_brush, 'Brush', 'brush_app.exe')
+            brush_paths = [
+                _bundled_brush,           # Bundled Brush (highest priority)
+                r"C:\Brush\brush_app.exe",
+                r"C:\Brush\brush.exe",
+                "brush_app",  # Check PATH
+                "brush",      # Check PATH
+            ]
+
+            brush_path = None
+            for path in brush_paths:
+                if os.path.isabs(path) and os.path.exists(path):
+                    brush_path = path
+                    break
+                else:
+                    found = shutil.which(path)
+                    if found:
+                        brush_path = found
+                        break
+
+            brush_available = brush_path is not None
+            if brush_available:
+                add_log(f"Brush found at: {brush_path}", "INFO")
+            else:
+                add_log("Brush not found - will generate PLY from sparse reconstruction", "INFO")
+
+            if brush_available:
+                try:
+                    images_folder = os.path.join(parent_dir, 'images')
+                    source_folder = os.path.join(parent_dir, 'source')
+                    input_folder = os.path.join(parent_dir, 'input')
+
+                    def count_images(folder):
+                        if os.path.exists(folder):
+                            return len([f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                        return 0
+
+                    images_count = count_images(images_folder)
+
+                    if images_count > 0:
+                        add_log(f"Using undistorted images folder ({images_count} images)", "INFO")
+                    else:
+                        source_count = count_images(source_folder)
+                        input_count = count_images(input_folder)
+                        add_log(f"No undistorted images found, checking source/input (source: {source_count}, input: {input_count})", "INFO")
+                        if source_count > 0:
+                            if os.path.exists(images_folder):
+                                shutil.rmtree(images_folder)
+                            shutil.copytree(source_folder, images_folder)
+                            add_log(f"Created images folder from source ({source_count} images)", "INFO")
+                        elif input_count > 0:
+                            if os.path.exists(images_folder):
+                                shutil.rmtree(images_folder)
+                            shutil.copytree(input_folder, images_folder)
+                            add_log(f"Created images folder from input ({input_count} images)", "INFO")
+
+                    if os.path.exists(images_folder):
+                        image_files = [f for f in os.listdir(images_folder)
+                                      if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                        add_log(f"Found {len(image_files)} images for Brush training", "INFO")
+                    else:
+                        add_log(f"Warning: images folder not found at {images_folder}", "WARNING")
+
+                    # Run Brush training
+                    add_log(f"Training with {training_steps} steps", "INFO")
+                    export_path = parent_dir
+
+                    sharpness_boost_enabled = config.get('sharpness_boost', False)
+                    grad_threshold = "0.00002" if sharpness_boost_enabled else "0.00004"
+                    growth_fraction = "0.15" if sharpness_boost_enabled else "0.1"
+                    refine_every = "100" if sharpness_boost_enabled else "150"
+                    max_res = "1920" if sharpness_boost_enabled else "1280"
+
+                    brush_cmd = [
+                        brush_path,
+                        parent_dir,
+                        "--total-steps", str(training_steps),
+                        "--export-path", export_path,
+                        "--export-name", "gaussian_splat.ply",
+                        "--export-every", str(training_steps),
+                        "--max-resolution", max_res,
+                        "--growth-grad-threshold", grad_threshold,
+                        "--growth-select-fraction", growth_fraction,
+                        "--refine-every", refine_every,
+                    ]
+
+                    add_log(f"Quality settings: grad_threshold={grad_threshold}", "INFO")
+                    add_log(f"Starting Brush training with {training_steps} steps...", "INFO")
+                    add_log(f"Brush command: {' '.join(brush_cmd)}", "DEBUG")
+                    processing_status[job_id]['step'] = f'Training Gaussian Splats (0/{training_steps} steps)...'
+
+                    timeout_seconds = max(7200, (training_steps // 500) * 60 + 3600)
+                    add_log(f"Brush pinned to GPU {job_gpu} via CUDA_VISIBLE_DEVICES", "INFO")
+                    process = subprocess.Popen(
+                        brush_cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        env=gpu_env(job_gpu)
+                    )
+
+                    # Brush produces no stdout — estimate progress by elapsed time
+                    training_start = time.time()
+                    while process.poll() is None:
+                        elapsed = time.time() - training_start
+                        # Estimate: ~0.5s per step on average (adjusts as it runs)
+                        est_total_time = max(training_steps * 0.5, 60)
+                        pct = min(99, int(elapsed / est_total_time * 100))
+                        est_step = min(training_steps - 1, int(elapsed / 0.5))
+                        processing_status[job_id]['step'] = f'Training Gaussian Splats (~{est_step}/{training_steps} steps, {int(elapsed)}s elapsed)...'
+                        processing_status[job_id]['progress'] = pct
+                        if elapsed > timeout_seconds:
+                            process.kill()
+                            add_log("Brush timed out", "ERROR")
+                            break
+                        time.sleep(5)
+
+                    result_code = process.returncode
+                    add_log(f"Brush completed with return code: {result_code}", "INFO")
+
+                    if result_code == 0:
+                        possible_plys = [
+                            os.path.join(export_path, f"export_{training_steps}.ply"),
+                            os.path.join(export_path, "gaussian_splat.ply"),
+                            os.path.join(export_path, "splat.ply"),
+                        ]
+                        export_plys = list(Path(export_path).glob('export_*.ply'))
+                        if export_plys:
+                            possible_plys.extend([str(p) for p in export_plys])
+
+                        found_ply = None
+                        for ply_path in possible_plys:
+                            if os.path.exists(ply_path):
+                                found_ply = ply_path
+                                break
+
+                        if found_ply:
+                            output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
+                            if found_ply != output_ply:
+                                shutil.copy(found_ply, output_ply)
+                            ply_generated = True
+                            ply_size = os.path.getsize(output_ply) / (1024 * 1024)
+                            add_log(f"Brush training complete! Output: {output_ply} ({ply_size:.2f} MB)", "INFO")
+                        else:
+                            add_log(f"Brush completed but no PLY found in {export_path}", "WARNING")
+                            all_plys = list(Path(export_path).glob('*.ply'))
+                            if all_plys:
+                                output_ply = str(all_plys[0])
+                                ply_generated = True
+                                add_log(f"Found PLY file: {output_ply}", "INFO")
+                    else:
+                        add_log(f"Brush training failed with code {result_code}", "ERROR")
+
+                except Exception as e:
+                    add_log(f"Error running Brush: {e}", "ERROR")
+
         # Fallback: Generate basic point cloud from COLMAP if Brush failed
         if not ply_generated:
             processing_status[job_id]['step'] = 'Generating point cloud from COLMAP...'
@@ -843,11 +1017,15 @@ Tips:
 - Avoid reflective or transparent surfaces"""
         
         add_log(f"Processing failed: {error_msg[:200]}", "ERROR")
-        processing_status[job_id] = {
-            'status': 'error',
-            'error': error_msg,
-            'progress': 0
-        }
+        if job_id in processing_status:
+            processing_status[job_id]['status'] = 'error'
+            processing_status[job_id]['error'] = error_msg
+        else:
+            processing_status[job_id] = {
+                'status': 'error',
+                'error': error_msg,
+                'progress': 0
+            }
     finally:
         release_gpu(job_id)
 
@@ -1057,11 +1235,15 @@ For GPU acceleration:
 Continuing with CPU (slower)..."""
 
         add_log(f"ML-Sharp failed: {error_msg}", "ERROR")
-        processing_status[job_id] = {
-            'status': 'error',
-            'error': error_msg,
-            'progress': 0
-        }
+        if job_id in processing_status:
+            processing_status[job_id]['status'] = 'error'
+            processing_status[job_id]['error'] = error_msg
+        else:
+            processing_status[job_id] = {
+                'status': 'error',
+                'error': error_msg,
+                'progress': 0
+            }
     finally:
         release_gpu(job_id)
 
@@ -1073,7 +1255,6 @@ def index():
 def gpu_info():
     """Get GPU information for time estimation"""
     try:
-        import subprocess
         # Try to get NVIDIA GPU info
         result = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'],
                               capture_output=True, text=True, timeout=5)
@@ -1182,7 +1363,6 @@ def kill_all_processes():
     except ImportError:
         # psutil not installed, try using subprocess
         try:
-            import subprocess
             for name in process_names:
                 subprocess.run(['taskkill', '/F', '/IM', f'{name}.exe'], capture_output=True)
                 subprocess.run(['taskkill', '/F', '/IM', f'{name}'], capture_output=True)
@@ -1385,6 +1565,15 @@ def upload_files():
     matcher_type = request.form.get('matcher_type', 'exhaustive_matcher')
     interval = int(request.form.get('interval', 1))
 
+    # Auto-detect matcher type if set to "auto"
+    if matcher_type == 'auto':
+        if is_video:
+            matcher_type = 'sequential_matcher'
+            add_log("Auto-detected matcher: Sequential (video input)", "INFO")
+        else:
+            matcher_type = 'exhaustive_matcher'
+            add_log("Auto-detected matcher: Exhaustive (image input)", "INFO")
+
     # For videos, interval was already applied during frame extraction
     # So don't apply it again in COLMAP
     if is_video:
@@ -1395,39 +1584,37 @@ def upload_files():
 
     # Handle Sharpness & Training options (work with ANY preset)
     sharpness_boost = request.form.get('sharpness_boost', 'false').lower() == 'true'
-    quick_training_steps = request.form.get('quick_training_steps', None)
-    
-    # Check if user wants advanced settings (overrides preset)
-    advanced_settings = None
-    if request.form.get('use_advanced') == 'true':
-        # Map mvs_quality_mode (balanced/quality/ultra_sharpness) to quality_mode boolean
-        mvs_mode = request.form.get('mvs_quality_mode', 'balanced').lower()
-        quality_mode_enabled = mvs_mode in ['quality', 'ultra_sharpness']
-        
-        advanced_settings = {
-            'detail_level': request.form.get('detail_level', 'medium'),
-            'training_steps': int(request.form.get('training_steps', 10000)),
-            'enable_dense': request.form.get('enable_dense', 'true').lower() == 'true',
-            'max_image_size': int(request.form.get('max_image_size', 3200)),
-            'quality_mode': quality_mode_enabled,
-            'mvs_quality_mode': mvs_mode  # Pass through for ultra_sharpness handling
-        }
-        add_log(f"Advanced settings override enabled (MVS mode: {mvs_mode})", "DEBUG")
-    
-    # Apply sharpness boost and quick training steps (can work with or without advanced settings)
-    if sharpness_boost or quick_training_steps:
-        if advanced_settings is None:
-            advanced_settings = {}
-        
-        if sharpness_boost:
-            advanced_settings['sharpness_boost'] = True
-            advanced_settings['mvs_quality_mode'] = 'ultra_sharpness'
-            advanced_settings['quality_mode'] = True
-            add_log("[SHARPNESS] Ultra Sharpness MVS boost enabled!", "INFO")
-        
-        if quick_training_steps:
-            advanced_settings['training_steps'] = int(quick_training_steps)
-            add_log(f"Training steps set to: {quick_training_steps}", "INFO")
+
+    # Quality scale multiplier: draft=0.3x, standard=1x, cinematic=2x
+    quality_scale_name = request.form.get('quality_scale', 'standard')
+    quality_scale_map = {'draft': 0.3, 'standard': 1.0, 'cinematic': 2.0}
+    quality_scale = quality_scale_map.get(quality_scale_name, 1.0)
+
+    # Trainer type: brush (default) or gsplat_mcmc
+    trainer_type = request.form.get('trainer', 'brush')
+
+    # Build advanced settings from form data (always available, behind details toggle)
+    mvs_mode = request.form.get('mvs_quality_mode', 'balanced').lower()
+    quality_mode_enabled = mvs_mode in ['quality', 'ultra_sharpness']
+
+    advanced_settings = {
+        'training_steps': request.form.get('training_steps', None),
+        'enable_dense': request.form.get('enable_dense', 'true').lower() == 'true',
+        'max_image_size': int(request.form.get('max_image_size', 3200)),
+        'quality_mode': quality_mode_enabled,
+        'mvs_quality_mode': mvs_mode,
+        'trainer': trainer_type,
+    }
+    # Convert training_steps to int if provided
+    if advanced_settings['training_steps'] is not None:
+        advanced_settings['training_steps'] = int(advanced_settings['training_steps'])
+
+    # Apply sharpness boost
+    if sharpness_boost:
+        advanced_settings['sharpness_boost'] = True
+        advanced_settings['mvs_quality_mode'] = 'ultra_sharpness'
+        advanced_settings['quality_mode'] = True
+        add_log("[SHARPNESS] Ultra Sharpness MVS boost enabled!", "INFO")
 
     # Route to appropriate processor based on method
     if method == 'mlsharp':
@@ -1446,7 +1633,7 @@ def upload_files():
         # Start async processing with new preset system
         thread = threading.Thread(
             target=process_images_async,
-            args=(job_id, images_folder, preset, matcher_type, colmap_interval, advanced_settings)
+            args=(job_id, images_folder, preset, matcher_type, colmap_interval, advanced_settings, quality_scale, trainer_type)
         )
 
     thread.daemon = True
@@ -1564,18 +1751,16 @@ def download_file(job_id, file_type):
     elif file_type == 'sparse':
         # Zip the sparse reconstruction
         if sparse_path and os.path.exists(sparse_path):
-            import tempfile
-            temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
-            temp_zip.close()
-            
-            with zipfile.ZipFile(temp_zip.name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            import io
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, dirs, files in os.walk(sparse_path):
                     for file in files:
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, sparse_path)
                         zipf.write(file_path, arcname)
-            
-            return send_file(temp_zip.name, as_attachment=True, download_name='sparse_reconstruction.zip')
+            zip_buffer.seek(0)
+            return send_file(zip_buffer, as_attachment=True, download_name='sparse_reconstruction.zip', mimetype='application/zip')
         else:
             return jsonify({'error': 'Sparse reconstruction not found'}), 404
     
@@ -1596,7 +1781,7 @@ def internal_error(error):
 
 @app.errorhandler(413)
 def request_too_large(error):
-    return jsonify({'error': 'File too large. Maximum upload size is 500MB.'}), 413
+    return jsonify({'error': 'File too large. Maximum upload size is 2GB.'}), 413
 
 if __name__ == '__main__':
     # Check ML-Sharp availability on startup
