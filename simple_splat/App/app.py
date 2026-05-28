@@ -12,6 +12,23 @@ if sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from flask import Flask, request, jsonify, render_template, send_file, Response, redirect
 from flask_cors import CORS
+
+# Batch processing
+try:
+    from batch_processing import batch_queue, register_batch_routes
+    BATCH_AVAILABLE = True
+except ImportError:
+    BATCH_AVAILABLE = False
+    print("Batch processing module not found - batch features disabled")
+
+# Camera tracking
+try:
+    from camera_tracking import extract_camera_poses, export_camera_json, export_camera_gltf, export_camera_fbx, export_blender_script, export_point_cloud_ply
+    CAMERA_TRACKING_AVAILABLE = True
+except ImportError:
+    CAMERA_TRACKING_AVAILABLE = False
+    print("Camera tracking module not found - tracking features disabled")
+
 from werkzeug.utils import secure_filename
 import subprocess
 import threading
@@ -27,13 +44,14 @@ IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
 
 def resize_images_for_colmap(image_folder, max_size=3840):
     """Downscale images larger than max_size to save COLMAP time.
-    4K images slow COLMAP 16x vs 2K. Returns count of resized images."""
+    4K images slow COLMAP 16x vs 2K. Returns count of resized images.
+    Uses ThreadPoolExecutor for parallel resize (PIL releases GIL during I/O)."""
     from PIL import Image
-    resized = 0
-    for fname in os.listdir(image_folder):
-        if not fname.lower().endswith(IMAGE_EXTENSIONS):
-            continue
-        fpath = os.path.join(image_folder, fname)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import multiprocessing
+
+    def _resize_one(args):
+        fpath, max_size = args
         try:
             img = Image.open(fpath)
             w, h = img.size
@@ -41,9 +59,22 @@ def resize_images_for_colmap(image_folder, max_size=3840):
                 scale = max_size / max(w, h)
                 img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
                 img.save(fpath, quality=95)
-                resized += 1
+                return True
         except Exception:
-            continue
+            pass
+        return False
+
+    tasks = []
+    for fname in os.listdir(image_folder):
+        if fname.lower().endswith(IMAGE_EXTENSIONS):
+            tasks.append((os.path.join(image_folder, fname), max_size))
+
+    resized = 0
+    workers = min(multiprocessing.cpu_count(), 8)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for result in pool.map(_resize_one, tasks):
+            if result:
+                resized += 1
     return resized
 
 def filter_blurry_images(image_folder, blur_threshold=100.0):
@@ -106,6 +137,35 @@ def check_mlsharp_availability():
 # Store processing status
 processing_status = {}
 job_start_times = {}  # Track when jobs were created
+
+# FIX #8: Persist job status to JSON files (survives server restart)
+_STATUS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'job_status')
+os.makedirs(_STATUS_DIR, exist_ok=True)
+
+def _save_job_status(job_id):
+    """Persist a single job's status to a JSON file."""
+    if job_id not in processing_status:
+        return
+    try:
+        status = processing_status[job_id].copy()
+        if 'logs' in status:
+            status['logs'] = list(status['logs'])
+        status_path = os.path.join(_STATUS_DIR, f'{job_id}.json')
+        with open(status_path, 'w') as f:
+            json.dump(status, f, default=str)
+    except Exception:
+        pass
+
+def _load_job_status(job_id):
+    """Load a job's status from JSON file (for recovery after restart)."""
+    try:
+        status_path = os.path.join(_STATUS_DIR, f'{job_id}.json')
+        if os.path.exists(status_path):
+            with open(status_path, 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
 
 # GPU assignment tracking — maps job_id -> gpu_index
 _gpu_lock = threading.Lock()
@@ -499,6 +559,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 'training': {'status': 'pending', 'started_at': None, 'elapsed': None},
             }
         }
+        _save_job_status(job_id)
 
         # Assign a GPU to this job (for Brush and ML-Sharp)
         job_gpu = assign_gpu(job_id)
@@ -540,38 +601,14 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
         set_progress_callback(colmap_progress_callback)
         
-        # Check for COLMAP before starting - try multiple paths
+        # FIX #2: Use cached COLMAP path from run_glomap (probed once, not per-job)
         add_log("Checking COLMAP installation...", "INFO")
-
-        # Add bundled COLMAP lib to PATH first (so DLLs are found without a system error popup)
-        _app_dir = os.path.dirname(os.path.abspath(__file__))
-        _project_root = os.path.dirname(_app_dir)
-        _bundled_colmap_bin_dir = os.path.join(_project_root, 'COLMAP', 'bin')
-        _bundled_colmap_lib = os.path.join(_project_root, 'COLMAP', 'lib')
-        _bundled_colmap_bin = os.path.join(_bundled_colmap_bin_dir, 'colmap.exe')
-        _current_path = os.environ.get("PATH", "")
-        if os.path.exists(_bundled_colmap_bin_dir) and _bundled_colmap_bin_dir not in _current_path:
-            os.environ["PATH"] = _bundled_colmap_bin_dir + ";" + _current_path
-        if os.path.exists(_bundled_colmap_lib) and _bundled_colmap_lib not in _current_path:
-            os.environ["PATH"] = _bundled_colmap_lib + ";" + os.environ.get("PATH", "")
-
-        # Try to find COLMAP - check PATH first, then common installation locations
-        colmap_path = None
-        possible_paths = [
-            _bundled_colmap_bin,  # Bundled COLMAP (highest priority - correct version)
-            "colmap",  # In PATH
-            r"C:\COLMAP\bin\colmap.exe",
-            r"C:\COLMAP\colmap.exe",
-        ]
-
-        # Also add system COLMAP bin/lib folders to PATH if present
-        colmap_bin_dir = r"C:\COLMAP\bin"
-        colmap_lib = r"C:\COLMAP\lib"
-        _current_path = os.environ.get("PATH", "")
-        if os.path.exists(colmap_bin_dir) and colmap_bin_dir not in _current_path:
-            os.environ["PATH"] = colmap_bin_dir + ";" + _current_path
-        if os.path.exists(colmap_lib) and colmap_lib not in _current_path:
-            os.environ["PATH"] = colmap_lib + ";" + os.environ.get("PATH", "")
+        from run_glomap import get_colmap_path
+        colmap_path = get_colmap_path()
+        if not colmap_path:
+            add_log("COLMAP not found!", "ERROR")
+            raise Exception("COLMAP is not installed or not in PATH. Please install COLMAP and add it to your PATH, or install it to C:\\COLMAP\\bin\\")
+        add_log(f"COLMAP cached at: {colmap_path}", "INFO")
 
         # Add MSVC cl.exe to PATH for gsplat JIT CUDA kernel compilation
         _msvc_bin = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"
@@ -584,20 +621,6 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                         os.environ["PATH"] = _cl_dir + ";" + os.environ.get("PATH", "")
                     add_log(f"MSVC cl.exe found at: {_cl_dir}", "INFO")
                     break
-
-        for path in possible_paths:
-            try:
-                result = subprocess.run([path, "--help"], capture_output=True, timeout=10)
-                if result.returncode == 0:
-                    colmap_path = path
-                    add_log(f"COLMAP found at: {path}", "INFO")
-                    break
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
-
-        if not colmap_path:
-            add_log("COLMAP not found!", "ERROR")
-            raise Exception("COLMAP is not installed or not in PATH. Please install COLMAP and add it to your PATH, or install it to C:\\COLMAP\\bin\\")
 
         # Check for COLMAP global_mapper (COLMAP 4.0+, replaces standalone GLOMAP)
         try:
@@ -907,26 +930,51 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     add_log(f"Brush pinned to GPU {job_gpu} via CUDA_VISIBLE_DEVICES", "INFO")
                     process = subprocess.Popen(
                         brush_cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
                         env=gpu_env(job_gpu)
                     )
 
-                    # Brush produces no stdout — estimate progress by elapsed time
+                    # FIX #1: Stream Brush stdout to parse actual step numbers
                     training_start = time.time()
+                    last_progress_time = 0
                     while process.poll() is None:
                         elapsed = time.time() - training_start
-                        # Estimate: ~0.5s per step on average (adjusts as it runs)
-                        est_total_time = max(training_steps * 0.5, 60)
-                        pct = min(99, int(elapsed / est_total_time * 100))
-                        est_step = min(training_steps - 1, int(elapsed / 0.5))
-                        processing_status[job_id]['step'] = f'Training Gaussian Splats (~{est_step}/{training_steps} steps, {int(elapsed)}s elapsed)...'
-                        processing_status[job_id]['progress'] = pct
+                        try:
+                            line = process.stdout.readline()
+                            if line:
+                                line = line.strip()
+                                if line:
+                                    add_log(f"Brush: {line}", "DEBUG")
+                                    # Parse step numbers from Brush output
+                                    step_match = re.search(r'[Ss]tep[:\s]+(\d+)\s*/?\s*(\d+)?', line)
+                                    if step_match:
+                                        current_step = int(step_match.group(1))
+                                        total = int(step_match.group(2)) if step_match.group(2) else training_steps
+                                        pct = min(99, int(current_step / total * 100))
+                                        processing_status[job_id]['step'] = f'Training Gaussian Splats ({current_step}/{total} steps, {int(elapsed)}s elapsed)...'
+                                        processing_status[job_id]['progress'] = pct
+                                    elif 'loss' in line.lower() and time.time() - last_progress_time > 5:
+                                        processing_status[job_id]['step'] = f'Training Gaussian Splats ({int(elapsed)}s elapsed, loss reported)...'
+                                        last_progress_time = time.time()
+                        except Exception:
+                            pass
+
+                        # Fallback: estimate by elapsed time if no stdout parsed yet
+                        if processing_status[job_id].get('progress', 0) < 5:
+                            est_total_time = max(training_steps * 0.5, 60)
+                            pct = min(99, int(elapsed / est_total_time * 100))
+                            est_step = min(training_steps - 1, int(elapsed / 0.5))
+                            processing_status[job_id]['step'] = f'Training Gaussian Splats (~{est_step}/{training_steps} steps, {int(elapsed)}s elapsed)...'
+                            processing_status[job_id]['progress'] = pct
+
                         if elapsed > timeout_seconds:
                             process.kill()
                             add_log("Brush timed out", "ERROR")
                             break
-                        time.sleep(5)
+                        time.sleep(2)
 
                     result_code = process.returncode
                     add_log(f"Brush completed with return code: {result_code}", "INFO")
@@ -996,6 +1044,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         processing_status[job_id]['sparse_path'] = sparse_path
         processing_status[job_id]['ply_path'] = output_ply if ply_generated else None
         processing_status[job_id]['ply_available'] = ply_generated
+        _save_job_status(job_id)
         
     except Exception as e:
         error_msg = str(e)
@@ -1026,6 +1075,7 @@ Tips:
                 'error': error_msg,
                 'progress': 0
             }
+        _save_job_status(job_id)
     finally:
         release_gpu(job_id)
 
@@ -1647,9 +1697,15 @@ def upload_files():
 
 @app.route('/status/<job_id>')
 def get_status(job_id):
-    """Get processing status"""
+    """Get processing status (checks memory first, then disk for recovery)"""
     if job_id not in processing_status:
-        return jsonify({'error': 'Job not found'}), 404
+        saved = _load_job_status(job_id)
+        if saved:
+            if 'logs' in saved and isinstance(saved['logs'], list):
+                saved['logs'] = deque(saved['logs'], maxlen=200)
+            processing_status[job_id] = saved
+        else:
+            return jsonify({'error': 'Job not found'}), 404
     
     # Convert to JSON-serializable dict (deque can't be serialized directly)
     status = processing_status[job_id].copy()
@@ -1771,6 +1827,72 @@ def view_result(job_id):
     """Redirect to SuperSplat viewer"""
     return redirect(f'/static/supersplat/index.html?load=/ply/{job_id}.ply')
 
+@app.route('/api/camera-tracking')
+def camera_tracking():
+    if not CAMERA_TRACKING_AVAILABLE:
+        return jsonify({'error': 'Camera tracking not available'}), 500
+
+    job_id = request.args.get('job_id')
+    export_format = request.args.get('format', 'all')
+    fps = int(request.args.get('fps', 30))
+    include_pc = request.args.get('pointcloud', 'false').lower() == 'true'
+
+    if not job_id:
+        return jsonify({'error': 'Missing job_id parameter'}), 400
+
+    if job_id in processing_status:
+        output_path = processing_status[job_id].get('output_path')
+    else:
+        output_path = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
+
+    if not output_path or not os.path.exists(output_path):
+        return jsonify({'error': 'Job not found'}), 404
+
+    sparse_dir = os.path.join(output_path, 'sparse', '0')
+    if not os.path.exists(sparse_dir):
+        return jsonify({'error': 'Sparse reconstruction not found'}), 400
+
+    tracking_dir = os.path.join(output_path, 'camera_tracking')
+    os.makedirs(tracking_dir, exist_ok=True)
+
+    try:
+        poses = extract_camera_poses(sparse_dir)
+        results = {'poses_count': len(poses), 'fps': fps, 'files': []}
+
+        if export_format in ('json', 'all'):
+            export_camera_json(poses, os.path.join(tracking_dir, 'cameras.json'), fps)
+            results['files'].append({'format': 'json'})
+
+        if export_format in ('gltf', 'all'):
+            export_camera_gltf(poses, os.path.join(tracking_dir, 'cameras.gltf'), fps)
+            results['files'].append({'format': 'gltf'})
+
+        if export_format in ('fbx', 'all'):
+            export_camera_fbx(poses, os.path.join(tracking_dir, 'cameras.fbx'), fps)
+            results['files'].append({'format': 'fbx'})
+
+        if export_format in ('blender', 'all'):
+            export_blender_script(poses, tracking_dir, fps)
+            results['files'].append({'format': 'blender'})
+
+        if include_pc:
+            p = export_point_cloud_ply(sparse_dir, os.path.join(tracking_dir, 'sparse_cloud.ply'))
+            if p:
+                results['files'].append({'format': 'ply'})
+
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/camera-tracking-info')
+def camera_tracking_info():
+    return jsonify({
+        'available': CAMERA_TRACKING_AVAILABLE,
+        'formats': ['json', 'gltf', 'fbx', 'blender'],
+    })
+
+
 @app.errorhandler(404)
 def not_found_error(error):
     return jsonify({'error': 'Not found'}), 404
@@ -1789,6 +1911,41 @@ if __name__ == '__main__':
 
     # Start background cleanup thread
     start_background_cleanup()
+
+    # Wire up batch processing (FIX: was imported but never registered)
+    if BATCH_AVAILABLE:
+        def _batch_process_fn(job_id, image_path, preset, settings):
+            """Direct call to process_images_async — no self-HTTP roundtrip."""
+            trainer = settings.get('trainer', 'brush')
+            quality_scale_map = {'draft': 0.3, 'standard': 1.0, 'cinematic': 2.0}
+            quality_scale = quality_scale_map.get(settings.get('quality_scale', 'standard'), 1.0)
+            advanced_settings = {
+                'training_steps': settings.get('training_steps'),
+                'enable_dense': settings.get('enable_dense', True),
+                'max_image_size': settings.get('max_image_size', 3200),
+                'trainer': trainer,
+            }
+            if advanced_settings['training_steps'] is not None:
+                advanced_settings['training_steps'] = int(advanced_settings['training_steps'])
+            process_images_async(
+                job_id, image_path, preset,
+                settings.get('matcher_type', 'exhaustive_matcher'),
+                int(settings.get('interval', 1)),
+                advanced_settings, quality_scale, trainer
+            )
+
+        def _batch_monitor_fn(job_id):
+            """Return current status dict for a job (direct memory access, no HTTP)."""
+            if job_id in processing_status:
+                s = processing_status[job_id].copy()
+                if 'logs' in s:
+                    s['logs'] = list(s['logs'])
+                return s
+            return None
+
+        register_batch_routes(app, app.config['PROCESSING_FOLDER'], None, _batch_process_fn, _batch_monitor_fn)
+        add_log("Batch processing enabled", "INFO")
+
     add_log("Gaussian Splatting Server starting...", "INFO")
     add_log(f"Max concurrent jobs: {MAX_CONCURRENT_JOBS}", "INFO")
     add_log(f"Auto-cleanup interval: {AUTO_CLEANUP_HOURS} hours", "INFO")

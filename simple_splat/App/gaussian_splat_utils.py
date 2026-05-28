@@ -57,8 +57,9 @@ def generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=True
         return False
 
 def write_ply_file(output_path, points, colors=None):
-    """Write a binary PLY file from points and optional colors"""
-    import struct
+    """Write a binary PLY file from points and optional colors.
+    Uses batched numpy tobytes() for ~10x faster writing vs per-vertex struct.pack."""
+    import numpy as np
     with open(output_path, 'wb') as f:
         # PLY header (ASCII)
         header = "ply\n"
@@ -74,13 +75,16 @@ def write_ply_file(output_path, points, colors=None):
         header += "end_header\n"
         f.write(header.encode('ascii'))
 
-        # Write vertices (binary)
-        for i, point in enumerate(points):
-            if colors and i < len(colors):
-                color = colors[i]
-                r = int(color[0])
-                g = int(color[1])
-                b = int(color[2])
-                f.write(struct.pack('<fffBBB', point[0], point[1], point[2], r, g, b))
-            else:
-                f.write(struct.pack('<fff', point[0], point[1], point[2]))
+        # Batch write using numpy tobytes() — ~10x faster than per-vertex struct.pack
+        pts = np.array(points, dtype=np.float32)
+        if colors:
+            cols = np.array(colors, dtype=np.uint8)
+            # Interleave: for each vertex, write 3 floats + 3 uchars
+            # Build a structured array
+            vertex_dtype = np.dtype([('xyz', np.float32, 3), ('rgb', np.uint8, 3)])
+            vertices = np.empty(len(pts), dtype=vertex_dtype)
+            vertices['xyz'] = pts
+            vertices['rgb'] = cols
+            f.write(vertices.tobytes())
+        else:
+            f.write(pts.tobytes())

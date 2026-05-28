@@ -1,0 +1,10 @@
+# Data folders  
+processing/  
+uploads/  
+job_status/  
+_batch_staging/  
+*.db  
+__pycache__/  
+.env  
+node_modules/  
+.next/ 

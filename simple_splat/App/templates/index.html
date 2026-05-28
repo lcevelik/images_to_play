@@ -612,6 +612,14 @@
                 </select>
 
                 <div class="info-box" id="mlsharpOptions" style="display: none;">
+                        <div style="margin-bottom: 10px;">
+                            <label for="mlsharpDevice" style="display: block; margin-bottom: 4px; font-size: 13px; color: #aaa;">Device</label>
+                            <select id="mlsharpDevice" style="width: 100%; padding: 6px 10px; background: #1a1a2e; border: 1px solid #333; border-radius: 6px; color: #fff; font-size: 13px;">
+                                <option value="auto">Auto (GPU if available)</option>
+                                <option value="cuda">CUDA (GPU)</option>
+                                <option value="cpu">CPU (slower)</option>
+                            </select>
+                        </div>
                     <label style="display: flex; align-items: center;">
                         <input type="checkbox" id="mlsharpRender">
                         <span style="font-weight: 600;">Generate Novel Views</span>
@@ -1174,6 +1182,9 @@
             }
         }
 
+        let _lastProgress = -1;
+        let _pollInterval = 1500;  // Start at 1.5s, back off to 10s when idle
+
         async function pollStatus() {
             if (!currentJobId) return;
 
@@ -1229,9 +1240,18 @@
                         updateStagesFromStep(step, data.progress || 0);
                     }
 
-                    setTimeout(pollStatus, 1500);
+                    // FIX #10: Adaptive polling — slow down when progress stalls
+                    const currentProgress = data.progress || 0;
+                    if (currentProgress !== _lastProgress) {
+                        _pollInterval = 1500;  // Progress changed: poll fast
+                    } else {
+                        _pollInterval = Math.min(_pollInterval * 1.5, 10000);  // No change: back off to 10s max
+                    }
+                    _lastProgress = currentProgress;
+                    setTimeout(pollStatus, _pollInterval);
                 }
             } catch (error) {
+                _pollInterval = Math.min(_pollInterval * 2, 15000);  // Error: back off more
                 showError('Error checking status: ' + error.message);
                 processBtn.disabled = false;
                 stopElapsedTimer();

@@ -12,6 +12,125 @@ from shutil import copy2, move, rmtree
 # Thread-local storage for progress callbacks (thread-safe for concurrent jobs)
 _thread_local = threading.local()
 
+# ---- FIX #2: Cache COLMAP path (probe once at startup, not per-job) ----
+_colmap_path_cache = None
+_colmap_path_resolved = False
+
+def get_colmap_path():
+    """Return the COLMAP executable path, probing only once. Cached at module level."""
+    global _colmap_path_cache, _colmap_path_resolved
+    if _colmap_path_resolved:
+        return _colmap_path_cache
+
+    _colmap_path_resolved = True
+
+    # Add bundled COLMAP bin/lib folders to PATH for DLL loading
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    bundled_colmap_lib = os.path.join(project_root, 'COLMAP', 'lib')
+    bundled_colmap_bin_dir = os.path.join(project_root, 'COLMAP', 'bin')
+    bundled_colmap_bin = os.path.join(bundled_colmap_bin_dir, 'colmap.exe')
+    _current_path = os.environ.get("PATH", "")
+    if os.path.exists(bundled_colmap_bin_dir) and bundled_colmap_bin_dir not in _current_path:
+        os.environ["PATH"] = bundled_colmap_bin_dir + ";" + _current_path
+    if os.path.exists(bundled_colmap_lib) and bundled_colmap_lib not in _current_path:
+        os.environ["PATH"] = bundled_colmap_lib + ";" + os.environ.get("PATH", "")
+
+    # Also add system COLMAP bin/lib folders if present
+    colmap_bin_dir = r"C:\COLMAP\bin"
+    colmap_lib = r"C:\COLMAP\lib"
+    _current_path = os.environ.get("PATH", "")
+    if os.path.exists(colmap_bin_dir) and colmap_bin_dir not in _current_path:
+        os.environ["PATH"] = colmap_bin_dir + ";" + _current_path
+    if os.path.exists(colmap_lib) and colmap_lib not in _current_path:
+        os.environ["PATH"] = colmap_lib + ";" + os.environ.get("PATH", "")
+
+    possible_colmap_paths = [
+        bundled_colmap_bin,  # Bundled COLMAP (highest priority - correct version)
+        "colmap",  # In PATH
+        r"C:\COLMAP\bin\colmap.exe",
+        r"C:\COLMAP\colmap.exe",
+    ]
+
+    for path in possible_colmap_paths:
+        try:
+            result = subprocess.run([path, "--help"], capture_output=True, timeout=10)
+            if result.returncode == 0:
+                _colmap_path_cache = path
+                print(f"[COLMAP] Found at: {path} (cached for all jobs)")
+                break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+    if not _colmap_path_cache:
+        print("[COLMAP] WARNING: COLMAP not found in any location!")
+
+    return _colmap_path_cache
+
+def get_available_ram_mb():
+    """Return available system RAM in MB. Cross-platform."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available / (1024 * 1024))
+    except ImportError:
+        pass
+    # Fallback: try Windows WMIC
+    try:
+        import subprocess as sp
+        r = sp.run(['wmic', 'OS', 'get', 'FreePhysicalMemory', '/value'],
+                    capture_output=True, text=True, timeout=5)
+        for line in r.stdout.splitlines():
+            if 'FreePhysicalMemory' in line and '=' in line:
+                kb = int(line.split('=')[1].strip())
+                return kb // 1024
+    except Exception:
+        pass
+    # Fallback: assume 16GB
+    return 16384
+
+def detect_mixed_cameras(image_path, sample_size=10):
+    """Check EXIF focal lengths of a sample of images. Returns True if variance is high."""
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+        import statistics
+    except ImportError:
+        return False  # Can't detect, assume single camera
+
+    focal_lengths = []
+    image_files = sorted([f for f in os.listdir(image_path)
+                          if f.lower().endswith(('.jpg', '.jpeg', '.png'))])[:sample_size]
+
+    for fname in image_files:
+        try:
+            img = Image.open(os.path.join(image_path, fname))
+            exif = img._getexif()
+            if not exif:
+                continue
+            for tag_id, value in exif.items():
+                tag = TAGS.get(tag_id, tag_id)
+                if tag == 'FocalLength':
+                    # Can be a tuple (numerator, denominator) or a float
+                    if isinstance(value, tuple):
+                        fl = float(value[0]) / float(value[1])
+                    else:
+                        fl = float(value)
+                    focal_lengths.append(fl)
+                    break
+        except Exception:
+            continue
+
+    if len(focal_lengths) < 3:
+        return False  # Not enough data, assume single camera
+
+    # If coefficient of variation > 10%, cameras are likely mixed
+    mean_fl = statistics.mean(focal_lengths)
+    if mean_fl == 0:
+        return False
+    cv = statistics.stdev(focal_lengths) / mean_fl
+    return cv > 0.10
+
+
 def _load_presets():
     """Load preset JSON files from presets/ directory. Returns dict or None if not found."""
     preset_dir = pathlib.Path(__file__).parent / "presets"
@@ -63,7 +182,12 @@ def filter_images(image_path, interval):
         filtered_files = image_files[::interval]
 
         for file in filtered_files:
-            copy2(os.path.join(image_path, file), os.path.join(input_folder, file))
+            src = os.path.join(image_path, file)
+            dst = os.path.join(input_folder, file)
+            try:
+                os.link(src, dst)  # Hardlink: instant, no disk I/O, no extra space
+            except OSError:
+                copy2(src, dst)  # Fallback: cross-volume or filesystem doesn't support links
 
         return input_folder
     return image_path
@@ -362,7 +486,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
         f'{colmap_cmd} feature_extractor '
         f'--image_path "{image_path}" '
         f'--database_path "{database_path}" '
-        f'--ImageReader.single_camera 1 '
+        f'--ImageReader.single_camera {0 if detect_mixed_cameras(image_path) else 1} '
         f'--ImageReader.camera_model SIMPLE_RADIAL '
         f'{feature_limit}'
         f'--FeatureExtraction.use_gpu 1 '
@@ -748,7 +872,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                         f'--PatchMatchStereo.num_iterations {mvs_iters} '
                         f'--PatchMatchStereo.num_samples {mvs_samples} '
                         f'--PatchMatchStereo.filter_min_ncc {mvs_filter_ncc} '
-                        f'--PatchMatchStereo.cache_size 44000'
+                        f'--PatchMatchStereo.cache_size {int(get_available_ram_mb() * 0.7)}'
                     )
                     
                     log_progress(f"[MVS] Window radius: {mvs_window}, Iterations: {mvs_iters}, Samples: {mvs_samples}", "INFO")
@@ -850,7 +974,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                                 f'--PatchMatchStereo.num_iterations {fallback_iters} '
                                 f'--PatchMatchStereo.num_samples {fallback_samples} '
                                 f'--PatchMatchStereo.filter_min_ncc {mvs_filter_ncc} '
-                                f'--PatchMatchStereo.cache_size 44000'
+                                f'--PatchMatchStereo.cache_size {int(get_available_ram_mb() * 0.7)}'
                             )
                             
                             log_file.write(f"Fallback command: {patch_match_fallback}\n")

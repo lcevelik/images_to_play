@@ -16,6 +16,8 @@ from pathlib import Path
 
 def load_colmap_dataset(parent_dir):
     """Load COLMAP reconstruction and undistorted images.
+    Images and c2w matrices stay on CPU to avoid GPU OOM.
+    Only moved to GPU on-demand in the training loop.
 
     Args:
         parent_dir: Path containing sparse/0/ and images/ directories
@@ -59,6 +61,7 @@ def load_colmap_dataset(parent_dir):
         img_path = os.path.join(images_dir, available_images[name_lower])
         img = Image.open(img_path).convert('RGB')
         img_np = np.array(img).astype(np.float32) / 255.0
+        # Keep on CPU — moved to GPU on-demand in training loop
         image_tensors.append(torch.from_numpy(img_np))
 
         cam = recon.cameras[image.camera_id]
@@ -76,6 +79,7 @@ def load_colmap_dataset(parent_dir):
         w2c_3x4 = np.array(image.cam_from_world().matrix(), dtype=np.float32)
         w2c_4x4 = np.eye(4, dtype=np.float32)
         w2c_4x4[:3, :] = w2c_3x4
+        # Keep on CPU — moved to GPU on-demand
         c2w_mats.append(torch.from_numpy(w2c_4x4))
         image_names.append(available_images[name_lower])
 
@@ -99,17 +103,27 @@ def load_colmap_dataset(parent_dir):
 
 
 def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
-    """Initialize Gaussian parameters from sparse point cloud."""
+    """Initialize Gaussian parameters from sparse point cloud.
+    Uses random subsample for scale estimation (avoids slow cKDTree on millions of points)."""
     import torch
     N = xyz.shape[0]
     means = torch.from_numpy(xyz).float()
 
-    # Estimate scale from nearest neighbor distances
+    # Estimate scale from random subsample nearest-neighbor distances
+    # (avoids building a full cKDTree on millions of points — 5-30s savings)
+    sample_size = min(10000, N)
+    indices = np.random.choice(N, sample_size, replace=False)
+    sample_xyz = xyz[indices]
+
+    # Compute pairwise distances for the subsample
     from scipy.spatial import cKDTree
-    tree = cKDTree(xyz)
-    dists, _ = tree.query(xyz, k=min(6, N))
-    avg_dist = dists[:, 1:].mean(axis=1)
-    scales = torch.from_numpy(avg_dist).float().unsqueeze(1).repeat(1, 3) * 0.5
+    tree = cKDTree(sample_xyz)
+    dists, _ = tree.query(sample_xyz, k=min(6, sample_size))
+    avg_sample_dist = dists[:, 1:].mean(axis=1)
+    global_avg_scale = float(avg_sample_dist.mean()) * 0.5
+
+    # Use uniform scale from subsample estimate (fast, good enough for init)
+    scales = torch.full((N, 3), global_avg_scale)
 
     # Identity quaternions (w, x, y, z)
     quats = torch.zeros(N, 4)
@@ -225,9 +239,9 @@ def train_mcmc(parent_dir, total_steps=10000, cap_max=1_500_000,
     )
     strategy_state = strategy.initialize_state()
 
-    # Pre-move camera data to device
-    c2w_mats = [m.to(device) for m in dataset['c2w_mats']]
-    img_tensors = [img.to(device) for img in dataset['images']]
+    # NOTE: c2w_mats and img_tensors stay on CPU (loaded in load_colmap_dataset)
+    # Only the current batch image is moved to GPU each step — prevents OOM
+    # on GPUs with <16GB VRAM when processing 200+ images at 4K
 
     def ssim_loss(pred, target, window_size=11):
         """Simplified SSIM loss."""
@@ -253,8 +267,9 @@ def train_mcmc(parent_dir, total_steps=10000, cap_max=1_500_000,
     for step in range(total_steps):
         idx = np.random.randint(num_images)
         cam = dataset['cameras'][idx]
-        c2w = c2w_mats[idx]
-        gt_image = img_tensors[idx]
+        # Move only this image's data to GPU (not all images)
+        c2w = dataset['c2w_mats'][idx].to(device)
+        gt_image = dataset['images'][idx].to(device)
         # Use actual image dimensions (undistortion may change size from camera params)
         H, W = gt_image.shape[0], gt_image.shape[1]
 
