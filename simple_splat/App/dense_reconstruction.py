@@ -8,6 +8,7 @@ import os
 import subprocess
 import time
 import multiprocessing
+import psutil
 
 
 def run_dense_reconstruction(parent_dir, image_path, sparse_path, enable_dense=True, max_image_size=3200, quality_mode=False, ultra_sharpness_mode=False, colmap_path='colmap'):
@@ -122,7 +123,7 @@ def run_dense_reconstruction(parent_dir, image_path, sparse_path, enable_dense=T
         f'--PatchMatchStereo.filter_min_triangulation_angle 1.0 '
         f'--PatchMatchStereo.filter_min_num_consistent 2 '
         f'--PatchMatchStereo.filter_geom_consistency_max_cost {filter} '
-        f'--PatchMatchStereo.cache_size 32'
+        f'--PatchMatchStereo.cache_size {max(16, int(__import__("psutil").virtual_memory().total / (1024**3) * 0.7))}'
     )
 
     result = subprocess.run(stereo_cmd, shell=True, capture_output=True, text=True)
