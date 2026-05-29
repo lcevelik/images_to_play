@@ -122,20 +122,23 @@ def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
     avg_sample_dist = dists[:, 1:].mean(axis=1)
     global_avg_scale = float(avg_sample_dist.mean()) * 0.5
 
-    # Use uniform scale from subsample estimate (fast, good enough for init)
-    scales = torch.full((N, 3), global_avg_scale)
+    # Per-point scale from nearest neighbor distances (matches gsplat official)
+    tree_all = cKDTree(xyz)
+    dists_all, _ = tree_all.query(xyz, k=min(4, N))
+    dist_avg = np.sqrt((dists_all[:, 1:] ** 2).mean(axis=1))
+    scales_np = np.log(dist_avg * 1.0).astype(np.float32)
+    scales = torch.from_numpy(scales_np).unsqueeze(-1).repeat(1, 3)
 
     # Identity quaternions (w, x, y, z)
-    quats = torch.zeros(N, 4)
-    quats[:, 0] = 1.0
+    quats = torch.rand(N, 4)
 
     # Initial opacity (sigmoid inverse of 0.5)
-    opacities = torch.zeros(N)
+    opacities = torch.full((N,), torch.logit(torch.tensor(0.1)).item())
 
     # SH coefficients from RGB
     C0 = 0.28209479177387814
     rgb_tensor = torch.from_numpy(rgb).float()
-    sh0 = rgb_tensor / C0
+    sh0 = (rgb_tensor - 0.5) / C0
     sh0 = sh0.unsqueeze(1)  # (N, 1, 3)
 
     num_sh_coeffs = (sh_degree + 1) ** 2
