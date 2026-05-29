@@ -273,10 +273,14 @@ def train_mcmc(parent_dir, total_steps=10000, cap_max=1_500_000,
         gt_image = dataset['images'][idx].to(device)
         # Use actual image dimensions (undistortion may change size from camera params)
         H, W = gt_image.shape[0], gt_image.shape[1]
+        # Scale intrinsics if image resolution differs from camera calibration
+        cam_w, cam_h = cam["width"], cam["height"]
+        sx = W / cam_w
+        sy = H / cam_h
 
         K = torch.tensor([
-            [cam['fx'], 0, cam['cx']],
-            [0, cam['fy'], cam['cy']],
+            [cam['fx'] * sx, 0, cam['cx'] * sx],
+            [0, cam['fy'] * sy, cam['cy'] * sy],
             [0, 0, 1]
         ], device=device, dtype=torch.float32).unsqueeze(0)
 
@@ -296,7 +300,7 @@ def train_mcmc(parent_dir, total_steps=10000, cap_max=1_500_000,
             width=W,
             height=H,
             near_plane=0.01,
-            far_plane=100.0,
+            far_plane=1000.0,
             sh_degree=sh_degree,
             render_mode="RGB",
             absgrad=True,
