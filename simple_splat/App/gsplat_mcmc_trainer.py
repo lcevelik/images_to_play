@@ -75,13 +75,12 @@ def load_colmap_dataset(parent_dir):
         })
 
         # pycolmap's cam_from_world is world-to-camera (w2c), NOT camera-to-world
-        # gsplat viewmats expect camera-to-world (c2w), so invert it
+        # gsplat viewmats expect world-to-camera (w2c)
         w2c_3x4 = np.array(image.cam_from_world().matrix(), dtype=np.float32)
         w2c_4x4 = np.eye(4, dtype=np.float32)
         w2c_4x4[:3, :] = w2c_3x4
-        c2w_4x4 = np.linalg.inv(w2c_4x4)
         # Keep on CPU — moved to GPU on-demand
-        c2w_mats.append(torch.from_numpy(c2w_4x4))
+        c2w_mats.append(torch.from_numpy(w2c_4x4))
         image_names.append(available_images[name_lower])
 
     sparse_xyz = []
@@ -136,7 +135,7 @@ def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
     # SH coefficients from RGB
     C0 = 0.28209479177387814
     rgb_tensor = torch.from_numpy(rgb).float()
-    sh0 = (rgb_tensor - 0.5) / C0
+    sh0 = rgb_tensor / C0
     sh0 = sh0.unsqueeze(1)  # (N, 1, 3)
 
     num_sh_coeffs = (sh_degree + 1) ** 2
