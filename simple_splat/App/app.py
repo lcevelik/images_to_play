@@ -1778,6 +1778,31 @@ def download_file(job_id, file_type):
             return jsonify({'error': 'Sparse reconstruction not found'}), 404
     
     return jsonify({'error': 'Invalid file type'}), 400
+@app.route('/download/<job_id>/tracking/<filename>')
+def download_tracking_file(job_id, filename):
+    """Download camera tracking export files"""
+    import re as _re
+    # Sanitize filename
+    safe_name = _re.sub(r'[^a-zA-Z0-9_.\-]', '', filename)
+    if not safe_name:
+        return jsonify({'error': 'Invalid filename'}), 400
+    
+    # Resolve path
+    if job_id in processing_status:
+        output_path = processing_status[job_id].get('output_path')
+    else:
+        output_path = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
+    
+    if not output_path:
+        return jsonify({'error': 'Job not found'}), 404
+    
+    tracking_dir = os.path.join(output_path, 'camera_tracking')
+    file_path = os.path.join(tracking_dir, safe_name)
+    
+    if not os.path.exists(file_path):
+        return jsonify({'error': f'File not found: {safe_name}'}), 404
+    
+    return send_file(file_path, as_attachment=True, download_name=safe_name)
 
 @app.route('/view/<job_id>')
 def view_result(job_id):

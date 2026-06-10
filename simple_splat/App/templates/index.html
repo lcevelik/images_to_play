@@ -405,6 +405,103 @@
             background: #3a3a3a;
         }
 
+        /* Camera Tracking Export Section */
+        .tracking-section {
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .tracking-section .section-label {
+            font-size: 0.85em;
+            font-weight: 600;
+            color: #86868b;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 10px;
+        }
+
+        .tracking-controls {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .tracking-controls select,
+        .tracking-controls input[type="number"] {
+            padding: 6px 10px;
+            background: #2a2a2a;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            color: #f5f5f7;
+            font-size: 0.85em;
+        }
+
+        .tracking-controls label {
+            font-size: 0.85em;
+            color: #86868b;
+        }
+
+        .tracking-export-btn {
+            padding: 8px 16px;
+            background: #30d158;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.85em;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .tracking-export-btn:hover {
+            background: #34c759;
+            transform: translateY(-1px);
+        }
+
+        .tracking-export-btn:disabled {
+            background: #3a3a3a;
+            color: #86868b;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .tracking-downloads {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .tracking-downloads a {
+            padding: 6px 12px;
+            background: #2a2a2a;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            color: #f5f5f7;
+            text-decoration: none;
+            font-size: 0.8em;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+
+        .tracking-downloads a:hover {
+            background: #3a3a3a;
+            transform: translateY(-1px);
+        }
+
+        .tracking-status {
+            font-size: 0.8em;
+            color: #86868b;
+            margin-top: 8px;
+        }
+
+        .tracking-status.error {
+            color: #ff453a;
+        }
+
         .error {
             color: #ff453a;
             background: rgba(255, 69, 58, 0.1);
@@ -788,6 +885,27 @@
                         <a href="#" class="result-btn btn-primary" id="viewBtn" target="_blank">
                             View in Browser
                         </a>
+                    </div>
+                    <div class="tracking-section" id="trackingSection">
+                        <div class="section-label">Camera Tracking Export</div>
+                        <div class="tracking-controls">
+                            <label>Format:</label>
+                            <select id="trackingFormat">
+                                <option value="all">All (FBX + GLTF + JSON + Blender)</option>
+                                <option value="fbx">FBX</option>
+                                <option value="gltf">GLTF</option>
+                                <option value="json">JSON</option>
+                                <option value="blender">Blender Script</option>
+                            </select>
+                            <label>FPS:</label>
+                            <input type="number" id="trackingFps" value="30" min="1" max="120" style="width: 60px;">
+                            <label><input type="checkbox" id="trackingPc"> + Point Cloud</label>
+                        </div>
+                        <button class="tracking-export-btn" id="trackingExportBtn" onclick="exportCameraTracking()">
+                            Export Camera Tracking
+                        </button>
+                        <div class="tracking-status" id="trackingStatus"></div>
+                        <div class="tracking-downloads" id="trackingDownloads" style="display: none;"></div>
                     </div>
                 </div>
 
@@ -1397,6 +1515,67 @@
         function showResults() {
             resultSection.classList.add('active');
             document.getElementById('viewBtn').href = `/static/supersplat/index.html?load=/ply/${currentJobId}.ply`;
+        }
+
+        async function exportCameraTracking() {
+            const btn = document.getElementById('trackingExportBtn');
+            const status = document.getElementById('trackingStatus');
+            const downloads = document.getElementById('trackingDownloads');
+            const format = document.getElementById('trackingFormat').value;
+            const fps = document.getElementById('trackingFps').value;
+            const includePc = document.getElementById('trackingPc').checked;
+
+            btn.disabled = true;
+            btn.textContent = 'Exporting...';
+            status.textContent = 'Extracting camera poses and exporting...';
+            status.className = 'tracking-status';
+            downloads.style.display = 'none';
+            downloads.innerHTML = '';
+
+            try {
+                const params = new URLSearchParams({
+                    job_id: currentJobId,
+                    format: format,
+                    fps: fps,
+                    pointcloud: includePc
+                });
+
+                const response = await fetch(`/api/camera-tracking?${params}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Export failed');
+                }
+
+                status.textContent = `✓ Exported ${data.poses_count} camera poses at ${data.fps} FPS`;
+                status.className = 'tracking-status';
+
+                // Build download links
+                const fileMap = {
+                    'json': 'cameras.json',
+                    'gltf': 'cameras.gltf',
+                    'fbx': 'cameras.fbx',
+                    'blender': 'import_camera.py',
+                    'ply': 'sparse_cloud.ply'
+                };
+
+                data.files.forEach(file => {
+                    const fileName = fileMap[file.format] || file.format;
+                    const link = document.createElement('a');
+                    link.href = `/download/${currentJobId}/tracking/${fileName}`;
+                    link.download = fileName;
+                    link.textContent = `⬇ ${file.format.toUpperCase()}`;
+                    downloads.appendChild(link);
+                });
+
+                downloads.style.display = 'flex';
+            } catch (error) {
+                status.textContent = `✗ ${error.message}`;
+                status.className = 'tracking-status error';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Export Camera Tracking';
+            }
         }
 
         function showError(message) {
