@@ -192,7 +192,7 @@ def filter_images(image_path, interval):
         return input_folder
     return image_path
 
-def run_colmap(image_path, matcher_type, interval, model_type, detail_level='medium', quality_mode=False, ultra_sharpness_mode=False, enable_dense_override=None):
+def run_colmap(image_path, matcher_type, interval, model_type, detail_level='medium', quality_mode=False, ultra_sharpness_mode=False, enable_dense_override=None, gpu_index=0, mvs_gpu_list=None):
     # Load presets from JSON files, fall back to inline dict if not found
     _json_presets = _load_presets()
 
@@ -306,6 +306,10 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     # Use all CPU threads for maximum performance (GPU handles heavy lifting, CPU handles I/O)
     import multiprocessing
     num_threads = multiprocessing.cpu_count()
+
+    # Resolve MVS GPU list: comma-separated indices for patch_match_stereo (supports multi-GPU)
+    if mvs_gpu_list is None:
+        mvs_gpu_list = str(gpu_index)
 
     # Log all settings being applied
     log_progress("=" * 60, "INFO")
@@ -447,6 +451,8 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             f'--Mapper.filter_min_tri_angle {settings["tri_angle"]} '
             f'--Mapper.filter_max_reproj_error {settings["reproj_error"]} '
             f'--Mapper.num_threads {num_threads} '
+            f'--Mapper.ba_global_num_threads {num_threads} '
+            f'--Mapper.ba_local_num_threads {num_threads} '
         )
 
         log_progress(f"[CPU] Using {num_threads} threads for mapping & bundle adjustment", "INFO")
@@ -490,7 +496,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
         f'--ImageReader.camera_model SIMPLE_RADIAL '
         f'{feature_limit}'
         f'--FeatureExtraction.use_gpu 1 '
-        f'--FeatureExtraction.gpu_index -1 '
+        f'--FeatureExtraction.gpu_index {gpu_index} '
         f'--FeatureExtraction.num_threads {num_threads} '
         f'--SiftExtraction.first_octave -1 '
         f'--SiftExtraction.peak_threshold {settings["peak"]} '
@@ -521,7 +527,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
         f'{colmap_cmd} {matcher_type} '
         f'--database_path "{database_path}" '
         f'--FeatureMatching.use_gpu 1 '
-        f'--FeatureMatching.gpu_index -1 '
+        f'--FeatureMatching.gpu_index {gpu_index} '
         f'--FeatureMatching.num_threads {num_threads} '
         f'--SiftMatching.max_ratio {settings["match_ratio"]} '
         f'--FeatureMatching.max_num_matches {max_matches}'
@@ -867,11 +873,12 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                         f'--workspace_path "{parent_dir}" '
                         f'--workspace_format COLMAP '
                         f'--PatchMatchStereo.geom_consistency 1 '
-                        f'--PatchMatchStereo.gpu_index 0 '
+                        f'--PatchMatchStereo.gpu_index {mvs_gpu_list} '
                         f'--PatchMatchStereo.window_radius {mvs_window} '
                         f'--PatchMatchStereo.num_iterations {mvs_iters} '
                         f'--PatchMatchStereo.num_samples {mvs_samples} '
                         f'--PatchMatchStereo.filter_min_ncc {mvs_filter_ncc} '
+                        f'--PatchMatchStereo.num_threads {num_threads} '
                         f'--PatchMatchStereo.cache_size {int(get_available_ram_mb() * 0.7)}'
                     )
                     
@@ -900,7 +907,8 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                         total_images = len([f for f in os.listdir(os.path.join(parent_dir, 'images')) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
                     last_reported_view = 0
                     reached_100_percent = False
-                    
+                    mvs_pass = 1  # patch_match_stereo runs 2 passes when geom_consistency=1
+
                     while True:
                         line = pm_process.stdout.readline()
                         if not line and pm_process.poll() is not None:
@@ -918,26 +926,28 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                                     # Use the total from COLMAP if it's different (more accurate)
                                     if reported_total > 0:
                                         total_images = reported_total
-                                    # Only log if this is a new view (avoid duplicates) and not past 100%
+                                    # Detect second pass: view counter resets after reaching 100%
+                                    if reached_100_percent and current_view < last_reported_view // 2:
+                                        mvs_pass = 2
+                                        reached_100_percent = False
+                                        last_reported_view = 0
+                                        log_progress(f"  [MVS] Starting geometric consistency pass (pass 2/2)...", "INFO")
+                                    # Only log if this is a new view (avoid duplicates)
                                     if current_view > last_reported_view:
                                         last_reported_view = current_view
                                         image_count = current_view
-                                        # Cap percentage at 100% and stop logging once we reach 100%
                                         percentage = min(100, (100 * image_count // total_images) if total_images > 0 else 0)
-                                        
+                                        pass_label = f" [pass {mvs_pass}/2]" if mvs_pass == 2 else ""
                                         if percentage >= 100 and not reached_100_percent:
                                             reached_100_percent = True
-                                            log_progress(f"  [MVS] Processing depth map {image_count}/{total_images} (100%) - Finalizing...", "INFO")
+                                            log_progress(f"  [MVS]{pass_label} Processing depth map {image_count}/{total_images} (100%) - Finalizing...", "INFO")
                                         elif percentage < 100:
-                                            log_progress(f"  [MVS] Processing depth map {image_count}/{total_images} ({percentage}%)", "INFO")
-                                        # Don't log if we're past 100% - COLMAP may process extra views
+                                            log_progress(f"  [MVS]{pass_label} Processing depth map {image_count}/{total_images} ({percentage}%)", "INFO")
                                 else:
                                     # Fallback: count lines if we can't parse view numbers
                                     if not reached_100_percent:
                                         image_count += 1
-                                        # Cap percentage at 100%
                                         percentage = min(100, (100 * image_count // total_images) if total_images > 0 else 0)
-                                        
                                         if percentage >= 100:
                                             reached_100_percent = True
                                             log_progress(f"  [MVS] Processing depth map {image_count}/{total_images} (100%) - Finalizing...", "INFO")
@@ -968,7 +978,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                                 f'{colmap_cmd} patch_match_stereo '
                                 f'--workspace_path "{parent_dir}" '
                                 f'--workspace_format COLMAP '
-                                f'--PatchMatchStereo.gpu_index 0 '
+                                f'--PatchMatchStereo.gpu_index {gpu_index} '
                                 f'--PatchMatchStereo.geom_consistency 0 '
                                 f'--PatchMatchStereo.window_radius {fallback_window} '
                                 f'--PatchMatchStereo.num_iterations {fallback_iters} '
@@ -1010,7 +1020,8 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                             f'--StereoFusion.max_reproj_error {fusion_max_reproj} '
                             f'--StereoFusion.max_depth_error {fusion_max_depth} '
                             f'--StereoFusion.max_normal_error {fusion_max_normal} '
-                            f'--StereoFusion.check_num_images {fusion_check_images}'
+                            f'--StereoFusion.check_num_images {fusion_check_images} '
+                            f'--StereoFusion.num_threads {num_threads}'
                         )
                         log_file.write(f"Running: {fusion_cmd}\n")
                         
@@ -1027,6 +1038,8 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                             text=True, bufsize=1
                         )
                         
+                        fusion_images_total = 0
+                        fusion_images_done = 0
                         while True:
                             line = fusion_process.stdout.readline()
                             if not line and fusion_process.poll() is not None:
@@ -1034,8 +1047,16 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                             if line:
                                 line = line.strip()
                                 log_file.write(f"Fusion: {line}\n")
-                                if 'Fusing' in line or 'points' in line.lower():
-                                    log_progress(f"  [Fusion] {line[:80]}", "INFO")
+                                # "Fusing image X/Y" — granular per-image progress
+                                fuse_match = re.search(r'[Ff]using image\s+(\d+)\s*/\s*(\d+)', line)
+                                if fuse_match:
+                                    fusion_images_done = int(fuse_match.group(1))
+                                    fusion_images_total = int(fuse_match.group(2))
+                                    pct = int(100 * fusion_images_done / fusion_images_total)
+                                    if fusion_images_done % max(1, fusion_images_total // 10) == 0 or fusion_images_done == fusion_images_total:
+                                        log_progress(f"  [Fusion] Fusing image {fusion_images_done}/{fusion_images_total} ({pct}%)", "INFO")
+                                elif 'points' in line.lower() or 'filtered' in line.lower() or 'writing' in line.lower():
+                                    log_progress(f"  [Fusion] {line[:100]}", "INFO")
                         
                         fusion_returncode = fusion_process.returncode
                         fusion_time = time.time() - fusion_start

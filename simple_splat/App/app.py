@@ -660,7 +660,16 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
         # Run COLMAP/GLOMAP processing
         # Pass enable_dense as override to run_colmap (preset's dense setting can be overridden by user)
-        run_colmap(image_path, matcher_type, interval, '3dgs', detail_level, quality_mode, ultra_sharpness_enabled, enable_dense_override=enable_dense)
+        # Single job: give it all GPUs for max throughput; multi-job: pin to assigned GPU
+        with _gpu_lock:
+            active_job_count = len(_job_gpu)
+        if active_job_count <= 1 and GPU_COUNT > 1:
+            feat_gpu = -1  # COLMAP auto-uses all GPUs for feature extraction/matching
+            mvs_gpu_list = ",".join(str(i) for i in range(GPU_COUNT))  # e.g. "0,1"
+        else:
+            feat_gpu = job_gpu
+            mvs_gpu_list = str(job_gpu)
+        run_colmap(image_path, matcher_type, interval, '3dgs', detail_level, quality_mode, ultra_sharpness_enabled, enable_dense_override=enable_dense, gpu_index=feat_gpu, mvs_gpu_list=mvs_gpu_list)
         
         add_log("COLMAP processing complete!", "INFO")
         processing_status[job_id]['step'] = 'COLMAP processing complete. Preparing for Gaussian Splat training...'
@@ -887,54 +896,74 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     processing_status[job_id]['step'] = f'Training Gaussian Splats (0/{training_steps} steps)...'
 
                     timeout_seconds = max(7200, (training_steps // 500) * 60 + 3600)
-                    add_log(f"Brush pinned to GPU {job_gpu} via CUDA_VISIBLE_DEVICES", "INFO")
+                    with _gpu_lock:
+                        active_job_count = len(_job_gpu)
+                    if active_job_count <= 1 and GPU_COUNT > 1:
+                        # Single job: expose all GPUs so Brush can use maximum VRAM
+                        brush_env = os.environ.copy()
+                        brush_env['CUDA_VISIBLE_DEVICES'] = ",".join(str(i) for i in range(GPU_COUNT))
+                        add_log(f"Brush using all {GPU_COUNT} GPUs (CUDA_VISIBLE_DEVICES={brush_env['CUDA_VISIBLE_DEVICES']})", "INFO")
+                    else:
+                        brush_env = gpu_env(job_gpu)
+                        add_log(f"Brush pinned to GPU {job_gpu} via CUDA_VISIBLE_DEVICES", "INFO")
                     process = subprocess.Popen(
                         brush_cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
                         bufsize=1,
-                        env=gpu_env(job_gpu)
+                        env=brush_env
                     )
 
-                    # FIX #1: Stream Brush stdout to parse actual step numbers
+                    # Stream Brush stdout in a background thread so readline() never blocks the progress loop
                     training_start = time.time()
-                    last_progress_time = 0
+                    last_progress_time = [0]
+                    last_logged_step = [0]
+                    brush_current_step = [0]
+
+                    def _read_brush_stdout():
+                        for raw in process.stdout:
+                            line = raw.strip()
+                            if not line:
+                                continue
+                            add_log(f"Brush: {line}", "DEBUG")
+                            step_match = re.search(r'[Ss]tep[:\s]+(\d+)\s*/?\s*(\d+)?', line)
+                            if step_match:
+                                brush_current_step[0] = int(step_match.group(1))
+
+                    stdout_thread = threading.Thread(target=_read_brush_stdout, daemon=True)
+                    stdout_thread.start()
+
+                    last_info_log_step = [0]
                     while process.poll() is None:
                         elapsed = time.time() - training_start
-                        try:
-                            line = process.stdout.readline()
-                            if line:
-                                line = line.strip()
-                                if line:
-                                    add_log(f"Brush: {line}", "DEBUG")
-                                    # Parse step numbers from Brush output
-                                    step_match = re.search(r'[Ss]tep[:\s]+(\d+)\s*/?\s*(\d+)?', line)
-                                    if step_match:
-                                        current_step = int(step_match.group(1))
-                                        total = int(step_match.group(2)) if step_match.group(2) else training_steps
-                                        pct = min(99, int(current_step / total * 100))
-                                        processing_status[job_id]['step'] = f'Training Gaussian Splats ({current_step}/{total} steps, {int(elapsed)}s elapsed)...'
-                                        processing_status[job_id]['progress'] = pct
-                                    elif 'loss' in line.lower() and time.time() - last_progress_time > 5:
-                                        processing_status[job_id]['step'] = f'Training Gaussian Splats ({int(elapsed)}s elapsed, loss reported)...'
-                                        last_progress_time = time.time()
-                        except Exception:
-                            pass
+                        current_step = brush_current_step[0]
 
-                        # Fallback: estimate by elapsed time if no stdout parsed yet
-                        if processing_status[job_id].get('progress', 0) < 5:
-                            est_total_time = max(training_steps * 0.5, 60)
-                            pct = min(99, int(elapsed / est_total_time * 100))
-                            est_step = min(training_steps - 1, int(elapsed / 0.5))
-                            processing_status[job_id]['step'] = f'Training Gaussian Splats (~{est_step}/{training_steps} steps, {int(elapsed)}s elapsed)...'
+                        if current_step > 0:
+                            pct = min(99, int(current_step / training_steps * 100))
+                            processing_status[job_id]['step'] = f'Training Gaussian Splats ({current_step}/{training_steps} steps, {int(elapsed)}s elapsed)...'
                             processing_status[job_id]['progress'] = pct
+                            # Log to INFO every 5000 steps
+                            if current_step - last_info_log_step[0] >= 5000:
+                                last_info_log_step[0] = current_step
+                                add_log(f"[Brush] Step {current_step}/{training_steps} ({pct}%) — {int(elapsed)}s elapsed", "INFO")
+                        else:
+                            # No step parsed yet — time-based estimate
+                            est_total_time = max(training_steps * 0.5, 60)
+                            pct = min(5, int(elapsed / est_total_time * 100))
+                            processing_status[job_id]['step'] = f'Training Gaussian Splats (starting... {int(elapsed)}s elapsed)...'
+                            processing_status[job_id]['progress'] = pct
+                            if elapsed > 30 and time.time() - last_progress_time[0] > 60:
+                                last_progress_time[0] = time.time()
+                                add_log(f"[Brush] Training in progress — {int(elapsed)}s elapsed, waiting for step output...", "INFO")
 
                         if elapsed > timeout_seconds:
                             process.kill()
                             add_log("Brush timed out", "ERROR")
                             break
-                        time.sleep(2)
+                        time.sleep(5)
+
+                    stdout_thread.join(timeout=10)
 
                     result_code = process.returncode
                     add_log(f"Brush completed with return code: {result_code}", "INFO")
