@@ -8,3 +8,9 @@ __pycache__/
 .env  
 node_modules/  
 .next/ 
+  
+# Large files  
+mipnerf360.zip  
+target/  
+test_data/  
+Brush/ 

@@ -445,7 +445,7 @@ def extract_zip(zip_path, extract_to):
         zip_ref.extractall(extract_to)
     return extract_to
 
-def process_images_async(job_id, image_path, preset='medium', matcher_type='exhaustive_matcher', interval=1, advanced_settings=None, quality_scale=1.0, trainer='brush'):
+def process_images_async(job_id, image_path, preset='medium', matcher_type='exhaustive_matcher', interval=1, advanced_settings=None, quality_scale=1.0):
     """Process images using COLMAP/GLOMAP pipeline with optional dense reconstruction"""
     try:
         # Preset configuration - maps simple presets to detailed settings
@@ -527,7 +527,6 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         # Get preset config or default to medium
         config = preset_configs.get(preset, preset_configs['medium'])
         config['quality_scale'] = quality_scale
-        config['trainer'] = trainer
 
         # Allow advanced settings to override preset (skip None values to preserve preset defaults)
         if advanced_settings:
@@ -783,55 +782,16 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             add_log("Dense reconstruction disabled, using sparse points only", "INFO")
 
         add_log("=" * 50, "INFO")
-        trainer_type = config.get('trainer', 'brush')
-        if trainer_type == 'gsplat_mcmc':
-            add_log("STEP 3: Training Gaussian Splats with gsplat MCMC", "INFO")
-            processing_status[job_id]['step'] = 'Training with gsplat MCMC...'
-        else:
-            add_log("STEP 3: Training Gaussian Splats with Brush", "INFO")
-            processing_status[job_id]['step'] = 'Training Gaussian Splats with Brush...'
+        add_log("STEP 3: Training Gaussian Splats with Brush", "INFO")
+        processing_status[job_id]['step'] = 'Training Gaussian Splats with Brush...'
         add_log("=" * 50, "INFO")
         processing_status[job_id]['progress'] = 60
 
-        # Branch: gsplat MCMC trainer or Brush
+        # Branch: Brush trainer
         output_ply = None
         ply_generated = False
 
-        if trainer_type == 'gsplat_mcmc':
-            try:
-                from gsplat_mcmc_trainer import train_mcmc
-                add_log("Starting gsplat MCMC training...", "INFO")
-                processing_status[job_id]['step'] = 'Training with gsplat MCMC...'
-
-                def gsplat_progress(msg, level="INFO"):
-                    add_log(f"gsplat: {msg}", level)
-                    # Parse step number for progress
-                    m = re.search(r'Step\s+(\d+)/(\d+)', str(msg))
-                    if m:
-                        step = int(m.group(1))
-                        total = int(m.group(2))
-                        pct = min(int(step / total * 90) + 60, 99)
-                        processing_status[job_id]['progress'] = pct
-
-                output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
-                result = train_mcmc(
-                    parent_dir,
-                    total_steps=training_steps,
-                    cap_max=1_500_000,
-                    progress_callback=gsplat_progress,
-                    output_ply_path=output_ply,
-                )
-                if result and os.path.exists(result):
-                    ply_generated = True
-                    add_log(f"gsplat MCMC training complete! Output: {result}", "INFO")
-                else:
-                    add_log("gsplat MCMC training failed — falling back to Brush", "WARNING")
-                    trainer_type = 'brush'  # fall through to Brush
-            except Exception as e:
-                add_log(f"gsplat MCMC error: {e} — falling back to Brush", "WARNING")
-                trainer_type = 'brush'  # fall through to Brush
-
-        if trainer_type == 'brush' and not ply_generated:
+        if not ply_generated:
             # Check if Brush is available - try multiple installation locations
             _app_dir_brush = os.path.dirname(os.path.abspath(__file__))
             _project_root_brush = os.path.dirname(_app_dir_brush)
@@ -1640,8 +1600,6 @@ def upload_files():
     quality_scale_map = {'draft': 0.3, 'standard': 1.0, 'cinematic': 2.0}
     quality_scale = quality_scale_map.get(quality_scale_name, 1.0)
 
-    # Trainer type: brush (default) or gsplat_mcmc
-    trainer_type = request.form.get('trainer', 'brush')
 
     # Build advanced settings from form data (always available, behind details toggle)
     mvs_mode = request.form.get('mvs_quality_mode', 'balanced').lower()
@@ -1653,7 +1611,6 @@ def upload_files():
         'max_image_size': int(request.form.get('max_image_size', 3200)),
         'quality_mode': quality_mode_enabled,
         'mvs_quality_mode': mvs_mode,
-        'trainer': trainer_type,
     }
     # Convert training_steps to int if provided
     if advanced_settings['training_steps'] is not None:
@@ -1683,7 +1640,7 @@ def upload_files():
         # Start async processing with new preset system
         thread = threading.Thread(
             target=process_images_async,
-            args=(job_id, images_folder, preset, matcher_type, colmap_interval, advanced_settings, quality_scale, trainer_type)
+            args=(job_id, images_folder, preset, matcher_type, colmap_interval, advanced_settings, quality_scale)
         )
 
     thread.daemon = True
@@ -1916,14 +1873,12 @@ if __name__ == '__main__':
     if BATCH_AVAILABLE:
         def _batch_process_fn(job_id, image_path, preset, settings):
             """Direct call to process_images_async — no self-HTTP roundtrip."""
-            trainer = settings.get('trainer', 'brush')
             quality_scale_map = {'draft': 0.3, 'standard': 1.0, 'cinematic': 2.0}
             quality_scale = quality_scale_map.get(settings.get('quality_scale', 'standard'), 1.0)
             advanced_settings = {
                 'training_steps': settings.get('training_steps'),
                 'enable_dense': settings.get('enable_dense', True),
                 'max_image_size': settings.get('max_image_size', 3200),
-                'trainer': trainer,
             }
             if advanced_settings['training_steps'] is not None:
                 advanced_settings['training_steps'] = int(advanced_settings['training_steps'])
@@ -1931,7 +1886,7 @@ if __name__ == '__main__':
                 job_id, image_path, preset,
                 settings.get('matcher_type', 'exhaustive_matcher'),
                 int(settings.get('interval', 1)),
-                advanced_settings, quality_scale, trainer
+                advanced_settings, quality_scale
             )
 
         def _batch_monitor_fn(job_id):
