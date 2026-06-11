@@ -341,6 +341,14 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     parent_dir = os.path.abspath(os.path.join(image_path, os.pardir))
     image_path = filter_images(image_path, interval)
 
+    # Log exactly how many images COLMAP will receive
+    try:
+        colmap_image_count = len([f for f in os.listdir(image_path)
+                                   if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'))])
+        log_progress(f"[COLMAP] Image folder: {image_path} ({colmap_image_count} images)", "INFO")
+    except Exception:
+        pass
+
     distorted_folder = os.path.join(parent_dir, 'distorted')
     database_path = os.path.join(distorted_folder, 'database.db')
     sparse_folder = os.path.join(parent_dir, 'sparse')  # Top-level sparse folder

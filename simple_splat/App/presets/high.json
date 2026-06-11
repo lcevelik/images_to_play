@@ -9,10 +9,7 @@
   "ba_max_points": 10000000,
   "tri_complete_error": 64.0,
   "tri_merge_error": 64.0,
-  "dense": true,
-  "mvs_window_radius": 7,
-  "mvs_iterations": 10,
-  "mvs_samples": 25,
+  "dense": false,
   "force_quality": true,
-  "description": "Maximum Quality - Dense + Quality Mode, 5M-50M+ points, ~20-60 min"
+  "description": "Quality sweet spot - unlimited SIFT, tight COLMAP BA, sparse only, ~10-20 min"
 }

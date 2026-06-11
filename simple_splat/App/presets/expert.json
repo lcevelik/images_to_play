@@ -9,7 +9,7 @@
   "ba_max_points": 50000000,
   "tri_complete_error": 64.0,
   "tri_merge_error": 64.0,
-  "dense": true,
+  "dense": false,
   "expert": true,
   "domain_size_pooling": true,
   "affine_shape": true,
@@ -19,8 +19,5 @@
   "refine_principal": true,
   "refine_distortion": true,
   "extract_colors": true,
-  "mvs_window_radius": 9,
-  "mvs_iterations": 15,
-  "mvs_samples": 30,
-  "description": "Expert - All advanced features enabled"
+  "description": "Expert - All COLMAP features, full lens calibration, sparse only"
 }

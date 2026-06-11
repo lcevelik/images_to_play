@@ -142,6 +142,23 @@ job_start_times = {}  # Track when jobs were created
 _STATUS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'job_status')
 os.makedirs(_STATUS_DIR, exist_ok=True)
 
+# On startup: mark any orphaned "processing" jobs as "error".
+# A job stuck in "processing" means the server was killed mid-job — it will never complete.
+for _f in os.listdir(_STATUS_DIR):
+    if not _f.endswith('.json'):
+        continue
+    try:
+        _p = os.path.join(_STATUS_DIR, _f)
+        with open(_p) as _fp:
+            _d = json.load(_fp)
+        if _d.get('status') == 'processing':
+            _d['status'] = 'error'
+            _d['step'] = 'Interrupted — server restarted while job was running'
+            with open(_p, 'w') as _fp:
+                json.dump(_d, _fp)
+    except Exception:
+        pass
+
 def _save_job_status(job_id):
     """Persist a single job's status to a JSON file."""
     if job_id not in processing_status:
@@ -452,76 +469,44 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         preset_configs = {
             'low': {
                 'detail_level': 'low',
-                'training_steps': 3000,
+                'training_steps': 5000,
                 'enable_dense': False,
                 'max_image_size': 1600,
                 'quality_mode': False,
-                'description': 'Fast Preview - Sparse only, ~50K-200K points, ~2-5 min'
+                'description': 'Fast Preview - Sparse only, ~2-4 min'
             },
             'medium': {
                 'detail_level': 'medium',
-                'training_steps': 10000,
-                'enable_dense': True,
+                'training_steps': 15000,
+                'enable_dense': False,
                 'max_image_size': 3200,
                 'quality_mode': False,
-                'description': 'Balanced Quality - Dense enabled, ~500K-2M points, ~5-15 min'
+                'description': 'Daily Use - Sparse, LPIPS on, ~8-15 min'
             },
             'high': {
                 'detail_level': 'high',
                 'training_steps': 30000,
-                'enable_dense': True,
+                'enable_dense': False,
                 'max_image_size': 4800,
                 'quality_mode': True,
-                'description': 'Maximum Quality - Dense + Quality Mode, 5M-50M+ points, ~20-60 min'
+                'description': 'Quality sweet spot - unlimited SIFT, tight BA, ~15-30 min'
             },
-            'ultra': {
-                'detail_level': 'ultra',
-                'training_steps': 50000,
-                'enable_dense': True,
+            'quality': {
+                'detail_level': 'quality',
+                'training_steps': 60000,
+                'enable_dense': False,
                 'max_image_size': 4800,
                 'quality_mode': True,
-                'description': 'Ultra Quality - 65K features, dense enabled'
-            },
-            'extreme': {
-                'detail_level': 'extreme',
-                'training_steps': 80000,
-                'enable_dense': True,
-                'max_image_size': 4800,
-                'quality_mode': True,
-                'description': 'Extreme Quality - 100K features'
-            },
-            'insane': {
-                'detail_level': 'insane',
-                'training_steps': 150000,
-                'enable_dense': True,
-                'max_image_size': 4800,
-                'quality_mode': True,
-                'description': 'Insane Quality - Maximum permissive settings'
-            },
-            'unlimited': {
-                'detail_level': 'unlimited',
-                'training_steps': 200000,
-                'enable_dense': True,
-                'max_image_size': 4800,
-                'quality_mode': True,
-                'description': 'Unlimited - All features, maximum points'
+                'description': 'Maximum practical quality - aggressive COLMAP, ~30-60 min'
             },
             'expert': {
                 'detail_level': 'expert',
-                'training_steps': 200000,
-                'enable_dense': True,
+                'training_steps': 100000,
+                'enable_dense': False,
                 'max_image_size': 8192,
                 'quality_mode': True,
-                'description': 'Expert - All advanced features enabled'
+                'description': 'Expert - All COLMAP features, full lens calibration'
             },
-            'sharpness': {
-                'detail_level': 'sharpness',
-                'training_steps': 200000,
-                'enable_dense': True,
-                'max_image_size': 4800,
-                'quality_mode': True,
-                'description': 'Maximum Sharpness - Ultra MVS + 200K steps'
-            }
         }
 
         # Get preset config or default to medium
@@ -609,17 +594,35 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             raise Exception("COLMAP is not installed or not in PATH. Please install COLMAP and add it to your PATH, or install it to C:\\COLMAP\\bin\\")
         add_log(f"COLMAP cached at: {colmap_path}", "INFO")
 
-        # Add MSVC cl.exe to PATH for gsplat JIT CUDA kernel compilation
-        _msvc_bin = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"
-        if os.path.exists(_msvc_bin):
-            _msvc_versions = sorted(os.listdir(_msvc_bin), reverse=True)
-            for _v in _msvc_versions:
-                _cl_dir = os.path.join(_msvc_bin, _v, "bin", "Hostx64", "x64")
-                if os.path.exists(os.path.join(_cl_dir, "cl.exe")):
-                    if _cl_dir not in os.environ.get("PATH", ""):
-                        os.environ["PATH"] = _cl_dir + ";" + os.environ.get("PATH", "")
-                    add_log(f"MSVC cl.exe found at: {_cl_dir}", "INFO")
+        # Add MSVC cl.exe to PATH for gsplat JIT CUDA kernel compilation.
+        # Search across all VS versions and editions (BuildTools, Community, Professional, Enterprise).
+        _vs_roots = [
+            r"C:\Program Files\Microsoft Visual Studio",
+            r"C:\Program Files (x86)\Microsoft Visual Studio",
+        ]
+        _cl_found = False
+        for _vs_root in _vs_roots:
+            if _cl_found or not os.path.exists(_vs_root):
+                continue
+            for _year in sorted(os.listdir(_vs_root), reverse=True):  # 2022 before 2019
+                for _edition in ["BuildTools", "Enterprise", "Professional", "Community"]:
+                    _msvc_bin = os.path.join(_vs_root, _year, _edition, "VC", "Tools", "MSVC")
+                    if not os.path.exists(_msvc_bin):
+                        continue
+                    for _v in sorted(os.listdir(_msvc_bin), reverse=True):
+                        _cl_dir = os.path.join(_msvc_bin, _v, "bin", "Hostx64", "x64")
+                        if os.path.exists(os.path.join(_cl_dir, "cl.exe")):
+                            if _cl_dir not in os.environ.get("PATH", ""):
+                                os.environ["PATH"] = _cl_dir + ";" + os.environ.get("PATH", "")
+                            add_log(f"MSVC cl.exe found at: {_cl_dir}", "INFO")
+                            _cl_found = True
+                            break
+                    if _cl_found:
+                        break
+                if _cl_found:
                     break
+        if not _cl_found:
+            add_log("MSVC cl.exe not found — gsplat JIT compilation may fail. Install VS Build Tools.", "WARNING")
 
         # Check for COLMAP global_mapper (COLMAP 4.0+, replaces standalone GLOMAP)
         try:
@@ -714,10 +717,8 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
         # Dense reconstruction (generates millions of points instead of thousands)
         # Check if dense reconstruction already ran inside run_colmap() (for presets with dense: True)
-        # Presets that run dense in run_colmap: medium, high, ultra, extreme, maximum, insane, unlimited, dense, expert, sharpness
         dense_ply_path = None
-        detail_levels_with_mvs = ['unlimited', 'dense', 'expert', 'medium', 'high', 'ultra', 'extreme', 'maximum', 'insane', 'sharpness']
-        detail_level_includes_mvs = detail_level in detail_levels_with_mvs
+        detail_level_includes_mvs = False  # All presets now use sparse-only by default
         
         # Also check if dense PLY already exists (run_colmap may have already created it)
         potential_dense_ply = os.path.join(parent_dir, 'dense', 'fused.ply')
@@ -790,15 +791,51 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         else:
             add_log("Dense reconstruction disabled, using sparse points only", "INFO")
 
+        trainer_choice = config.get('trainer', 'brush')
+
         add_log("=" * 50, "INFO")
-        add_log("STEP 3: Training Gaussian Splats with Brush", "INFO")
-        processing_status[job_id]['step'] = 'Training Gaussian Splats with Brush...'
+        add_log(f"STEP 3: Training Gaussian Splats ({trainer_choice.upper()})", "INFO")
+        processing_status[job_id]['step'] = f'Training Gaussian Splats ({trainer_choice.upper()})...'
         add_log("=" * 50, "INFO")
         processing_status[job_id]['progress'] = 60
 
-        # Branch: Brush trainer
         output_ply = None
         ply_generated = False
+
+        # --- MCMC branch ---
+        if trainer_choice == 'mcmc' and not ply_generated:
+            add_log("Using gsplat MCMC trainer (explicit Gaussian cap, stochastic relocation)", "INFO")
+            try:
+                from gsplat_mcmc_trainer import train_mcmc
+                mcmc_output = os.path.join(parent_dir, 'gaussian_splat.ply')
+
+                def mcmc_log(msg, level="INFO"):
+                    add_log(f"[MCMC] {msg}", level)
+                    step_match = re.search(r'Step (\d+)/(\d+)', msg)
+                    if step_match:
+                        s, total = int(step_match.group(1)), int(step_match.group(2))
+                        pct = 60 + int(s / total * 35)
+                        processing_status[job_id]['progress'] = pct
+                        processing_status[job_id]['step'] = f'MCMC Training ({s}/{total} steps)...'
+
+                result_path = train_mcmc(
+                    parent_dir,
+                    total_steps=training_steps,
+                    cap_max=config.get('mcmc_cap', 1_000_000),
+                    sh_degree=3,
+                    use_lpips=(detail_level != 'low'),
+                    progress_callback=mcmc_log,
+                    output_ply_path=mcmc_output,
+                )
+                if result_path and os.path.exists(result_path):
+                    output_ply = result_path
+                    ply_generated = True
+                    ply_size = os.path.getsize(output_ply) / (1024 * 1024)
+                    add_log(f"MCMC training complete: {ply_size:.1f} MB", "INFO")
+                else:
+                    add_log("MCMC training returned no output — falling back to Brush", "WARNING")
+            except Exception as e:
+                add_log(f"MCMC trainer failed ({e}) — falling back to Brush", "WARNING")
 
         if not ply_generated:
             # Check if Brush is available - try multiple installation locations
@@ -875,7 +912,15 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     grad_threshold = "0.00002" if sharpness_boost_enabled else "0.00004"
                     growth_fraction = "0.15" if sharpness_boost_enabled else "0.1"
                     refine_every = "100" if sharpness_boost_enabled else "150"
-                    max_res = "1920" if sharpness_boost_enabled else "1280"
+                    # Sharpness gets 2560; all other presets get 1920 (was 1280, below Brush's own default)
+                    max_res = "2560" if sharpness_boost_enabled else "1920"
+                    # Scale densification window with run length; default 15K stops too early on long runs
+                    growth_stop = max(15000, min(int(training_steps * 0.5), 80000))
+
+                    # Brush's LPIPS pre-allocates a hardcoded 2.25 GB CubeCL buffer (9×2^28 bytes)
+                    # that always exceeds wgpu's 2 GB maxBindingSize limit — no flag can change
+                    # this without recompiling Brush. LPIPS is available via the MCMC trainer
+                    # (PyTorch/CUDA, no buffer limit). Brush always runs without LPIPS.
 
                     brush_cmd = [
                         brush_path,
@@ -888,24 +933,20 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                         "--growth-grad-threshold", grad_threshold,
                         "--growth-select-fraction", growth_fraction,
                         "--refine-every", refine_every,
+                        "--growth-stop-iter", str(growth_stop),
                     ]
 
-                    add_log(f"Quality settings: grad_threshold={grad_threshold}", "INFO")
+                    add_log(f"Quality settings: grad_threshold={grad_threshold}, max_res={max_res}, growth_stop={growth_stop}", "INFO")
                     add_log(f"Starting Brush training with {training_steps} steps...", "INFO")
                     add_log(f"Brush command: {' '.join(brush_cmd)}", "DEBUG")
                     processing_status[job_id]['step'] = f'Training Gaussian Splats (0/{training_steps} steps)...'
 
                     timeout_seconds = max(7200, (training_steps // 500) * 60 + 3600)
-                    with _gpu_lock:
-                        active_job_count = len(_job_gpu)
-                    if active_job_count <= 1 and GPU_COUNT > 1:
-                        # Single job: expose all GPUs so Brush can use maximum VRAM
-                        brush_env = os.environ.copy()
-                        brush_env['CUDA_VISIBLE_DEVICES'] = ",".join(str(i) for i in range(GPU_COUNT))
-                        add_log(f"Brush using all {GPU_COUNT} GPUs (CUDA_VISIBLE_DEVICES={brush_env['CUDA_VISIBLE_DEVICES']})", "INFO")
-                    else:
-                        brush_env = gpu_env(job_gpu)
-                        add_log(f"Brush pinned to GPU {job_gpu} via CUDA_VISIBLE_DEVICES", "INFO")
+                    # Brush uses CubeCL (Burn framework) which does NOT support multi-GPU.
+                    # Exposing CUDA_VISIBLE_DEVICES=0,1 causes BufferTooBig panic at ~2.25 GB.
+                    # Always pin Brush to a single GPU.
+                    brush_env = gpu_env(job_gpu)
+                    add_log(f"Brush pinned to GPU {job_gpu} (CubeCL single-GPU only)", "INFO")
                     process = subprocess.Popen(
                         brush_cmd,
                         stdout=subprocess.PIPE,
@@ -988,6 +1029,18 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                             output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
                             if found_ply != output_ply:
                                 shutil.copy(found_ply, output_ply)
+
+                            # Prune near-invisible Gaussians — removes ~50% with no visible quality change
+                            try:
+                                from gaussian_splat_utils import prune_gaussian_ply
+                                orig, kept = prune_gaussian_ply(output_ply, opacity_threshold=0.005)
+                                if orig > 0:
+                                    reduction = (1 - kept / orig) * 100
+                                    ply_size = os.path.getsize(output_ply) / (1024 * 1024)
+                                    add_log(f"[Prune] {orig:,} → {kept:,} Gaussians ({reduction:.0f}% removed) → {ply_size:.1f} MB", "INFO")
+                            except Exception as e:
+                                add_log(f"[Prune] skipped: {e}", "WARNING")
+
                             ply_generated = True
                             ply_size = os.path.getsize(output_ply) / (1024 * 1024)
                             add_log(f"Brush training complete! Output: {output_ply} ({ply_size:.2f} MB)", "INFO")
@@ -1630,20 +1683,18 @@ def upload_files():
     quality_scale = quality_scale_map.get(quality_scale_name, 1.0)
 
 
-    # Build advanced settings from form data (always available, behind details toggle)
     mvs_mode = request.form.get('mvs_quality_mode', 'balanced').lower()
     quality_mode_enabled = mvs_mode in ['quality', 'ultra_sharpness']
+    trainer_choice = request.form.get('trainer', 'brush').lower()
 
     advanced_settings = {
-        'training_steps': request.form.get('training_steps', None),
-        'enable_dense': request.form.get('enable_dense', 'true').lower() == 'true',
+        'training_steps': None,
+        'enable_dense': request.form.get('enable_dense', 'false').lower() == 'true',
         'max_image_size': int(request.form.get('max_image_size', 3200)),
         'quality_mode': quality_mode_enabled,
         'mvs_quality_mode': mvs_mode,
+        'trainer': trainer_choice,
     }
-    # Convert training_steps to int if provided
-    if advanced_settings['training_steps'] is not None:
-        advanced_settings['training_steps'] = int(advanced_settings['training_steps'])
 
     # Apply sharpness boost
     if sharpness_boost:
@@ -1917,6 +1968,33 @@ def request_too_large(error):
     return jsonify({'error': 'File too large. Maximum upload size is 2GB.'}), 413
 
 if __name__ == '__main__':
+    # Add MSVC cl.exe to PATH at startup so gsplat JIT compilation works for all subprocesses.
+    # Searches all VS versions (2019/2022) and editions (Community/BuildTools/Professional/Enterprise).
+    _startup_cl_found = False
+    for _vs_root in [r"C:\Program Files\Microsoft Visual Studio",
+                     r"C:\Program Files (x86)\Microsoft Visual Studio"]:
+        if _startup_cl_found or not os.path.exists(_vs_root):
+            continue
+        for _year in sorted(os.listdir(_vs_root), reverse=True):
+            for _edition in ["BuildTools", "Enterprise", "Professional", "Community"]:
+                _msvc_bin = os.path.join(_vs_root, _year, _edition, "VC", "Tools", "MSVC")
+                if not os.path.exists(_msvc_bin):
+                    continue
+                for _v in sorted(os.listdir(_msvc_bin), reverse=True):
+                    _cl_dir = os.path.join(_msvc_bin, _v, "bin", "Hostx64", "x64")
+                    if os.path.exists(os.path.join(_cl_dir, "cl.exe")):
+                        if _cl_dir not in os.environ.get("PATH", ""):
+                            os.environ["PATH"] = _cl_dir + ";" + os.environ.get("PATH", "")
+                        print(f"[startup] MSVC cl.exe added to PATH: {_cl_dir}")
+                        _startup_cl_found = True
+                        break
+                if _startup_cl_found:
+                    break
+            if _startup_cl_found:
+                break
+    if not _startup_cl_found:
+        print("[startup] WARNING: MSVC cl.exe not found — gsplat JIT will fail. Install VS Build Tools.")
+
     # Check ML-Sharp availability on startup
     check_mlsharp_availability()
 

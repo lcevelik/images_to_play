@@ -1,0 +1,15 @@
+{
+  "features": 0,
+  "peak": 0.00005,
+  "tracks": 20000000,
+  "octaves": 8,
+  "tri_angle": 0.005,
+  "reproj_error": 96.0,
+  "match_ratio": 0.995,
+  "ba_max_points": 20000000,
+  "tri_complete_error": 64.0,
+  "tri_merge_error": 64.0,
+  "dense": false,
+  "force_quality": true,
+  "description": "Maximum practical quality - aggressive COLMAP, sparse only, ~20-40 min"
+}

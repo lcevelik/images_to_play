@@ -56,6 +56,76 @@ def generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=True
         print(f"Error generating PLY: {e}")
         return False
 
+def prune_gaussian_ply(input_ply_path, output_ply_path=None, opacity_threshold=0.005):
+    """Remove near-invisible Gaussians from a 3DGS PLY file.
+
+    Keeps only Gaussians where sigmoid(raw_opacity) >= opacity_threshold.
+    Typically removes 40-60% of Gaussians with no perceptible quality change,
+    matching LichtFeld-Studio's default prune-ratio=0.6 behaviour.
+
+    Args:
+        input_ply_path: Path to input 3DGS PLY (binary little-endian)
+        output_ply_path: Output path — defaults to overwriting the input
+        opacity_threshold: Min opacity to keep (0.005 = half a percent)
+
+    Returns:
+        (original_count, kept_count) or (0, 0) on failure
+    """
+    import numpy as np
+
+    if output_ply_path is None:
+        output_ply_path = input_ply_path
+
+    try:
+        with open(input_ply_path, 'rb') as f:
+            header_lines = []
+            while True:
+                line = f.readline().decode('ascii', errors='replace').strip()
+                header_lines.append(line)
+                if line == 'end_header':
+                    break
+            data_bytes = f.read()
+
+        num_vertices = 0
+        properties = []
+        for line in header_lines:
+            if line.startswith('element vertex'):
+                num_vertices = int(line.split()[-1])
+            elif line.startswith('property'):
+                parts = line.split()
+                properties.append((parts[2], parts[1]))
+
+        type_map = {'float': np.float32, 'double': np.float64,
+                    'uchar': np.uint8, 'int': np.int32, 'uint': np.uint32}
+        dtype = np.dtype([(n, type_map.get(t, np.float32)) for n, t in properties])
+
+        data = np.frombuffer(data_bytes, dtype=dtype, count=num_vertices)
+
+        prop_names = [p[0] for p in properties]
+        if 'opacity' not in prop_names:
+            return 0, 0  # Not a 3DGS PLY
+
+        raw_opacity = data['opacity'].astype(np.float64)
+        actual_opacity = 1.0 / (1.0 + np.exp(-raw_opacity))
+        mask = actual_opacity >= opacity_threshold
+        pruned = data[mask]
+
+        new_header = '\n'.join(
+            f'element vertex {len(pruned)}' if l.startswith('element vertex') else l
+            for l in header_lines
+        ) + '\n'
+
+        with open(output_ply_path, 'wb') as f:
+            f.write(new_header.encode('ascii'))
+            f.write(pruned.tobytes())
+
+        return num_vertices, len(pruned)
+
+    except Exception as e:
+        print(f"PLY pruning failed: {e}")
+        return 0, 0
+
+
 def write_ply_file(output_path, points, colors=None):
     """Write a binary PLY file from points and optional colors.
     Uses batched numpy tobytes() for ~10x faster writing vs per-vertex struct.pack."""

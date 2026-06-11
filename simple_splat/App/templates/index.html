@@ -682,17 +682,39 @@
                 <label class="preset-option">
                     <input type="radio" name="preset" value="low">
                     <span style="font-weight: 600; color: #32d74b;">Fast</span>
-                    <span style="color: #a0a0a0; font-size: 0.85em;" id="time-low"> — 3K steps, ~2-5 min</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — 5K steps, ~2-4 min</span>
                 </label>
                 <label class="preset-option">
                     <input type="radio" name="preset" value="medium" checked>
                     <span style="font-weight: 600; color: #0a84ff;">Balanced</span>
-                    <span style="color: #a0a0a0; font-size: 0.85em;" id="time-medium"> — 10K steps, ~5-15 min</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — 15K steps, ~8-15 min</span>
                 </label>
                 <label class="preset-option">
                     <input type="radio" name="preset" value="high">
-                    <span style="font-weight: 600; color: #ff9f0a;">High Quality</span>
-                    <span style="color: #a0a0a0; font-size: 0.85em;" id="time-high"> — 30K steps, ~20-60 min</span>
+                    <span style="font-weight: 600; color: #ff9f0a;">High</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — 30K steps, ~15-30 min</span>
+                </label>
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="quality">
+                    <span style="font-weight: 600; color: #ff453a;">Quality</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — 60K steps, ~30-60 min</span>
+                </label>
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="expert">
+                    <span style="font-weight: 600; color: #bf5af2;">Expert</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — 100K steps, full lens calibration</span>
+                </label>
+
+                <div class="section-title" style="margin-top: 16px;">Trainer</div>
+                <label class="preset-option">
+                    <input type="radio" name="trainer" value="brush" checked>
+                    <span style="font-weight: 600; color: #0a84ff;">Brush</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — Standard 3DGS, fast &amp; reliable</span>
+                </label>
+                <label class="preset-option">
+                    <input type="radio" name="trainer" value="mcmc">
+                    <span style="font-weight: 600; color: #bf5af2;">MCMC</span>
+                    <span style="color: #a0a0a0; font-size: 0.85em;"> — Explicit cap (1M Gaussians), often higher quality</span>
                 </label>
 
                 <div class="section-title" style="margin-top: 16px;">Quality Scale</div>
@@ -725,84 +747,28 @@
                     </p>
                 </div>
 
-                <details>
-                    <summary>Advanced Settings</summary>
-                    <div id="advancedFields">
-                        <div class="form-group">
-                            <label>Matcher Type</label>
-                            <select id="matcherType">
-                                <option value="auto">Auto (Recommended)</option>
-                                <option value="exhaustive_matcher">Exhaustive (Best for <50 images)</option>
-                                <option value="sequential_matcher">Sequential (Best for video)</option>
-                            </select>
-                        </div>
-                        <div class="form-group" id="videoSettingsGroup">
-                            <label>Frame Interval</label>
-                            <select id="interval">
+                <!-- Video-only controls — shown automatically when a video file is detected -->
+                <div id="videoControls" style="display: none; margin-top: 16px; background: #2a2a2a; border-radius: 10px; padding: 16px;">
+                    <div style="font-size: 0.8em; color: #6e6e73; margin-bottom: 12px;">Video Settings</div>
+                    <div style="display: flex; gap: 12px;">
+                        <div style="flex: 1;">
+                            <label style="display: block; margin-bottom: 6px; font-size: 0.85em;">Frame Interval</label>
+                            <select id="interval" style="width: 100%; padding: 8px; background: #1c1c1e; border: 1px solid #3a3a3c; border-radius: 6px; color: #f5f5f7;">
                                 <option value="1">Every frame</option>
-                                <option value="5">Every 5th</option>
+                                <option value="5" selected>Every 5th</option>
                                 <option value="10">Every 10th</option>
                             </select>
                         </div>
-                        <div class="form-group" id="maxFramesGroup">
-                            <label>Max Frames</label>
-                            <select id="maxFrames">
+                        <div style="flex: 1;">
+                            <label style="display: block; margin-bottom: 6px; font-size: 0.85em;">Max Frames</label>
+                            <select id="maxFrames" style="width: 100%; padding: 8px; background: #1c1c1e; border: 1px solid #3a3a3c; border-radius: 6px; color: #f5f5f7;">
                                 <option value="500">500</option>
-                                <option value="1000">1000</option>
+                                <option value="1000" selected>1000</option>
                                 <option value="2000">2000</option>
                             </select>
                         </div>
-                        <div class="form-group">
-                            <label>Training Steps</label>
-                            <select id="trainingSteps">
-                                <option value="default">Preset Default</option>
-                                <option value="3000">3,000</option>
-                                <option value="10000">10,000</option>
-                                <option value="30000">30,000</option>
-                                <option value="50000">50,000</option>
-                                <option value="100000">100,000</option>
-                                <option value="200000">200,000</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>
-                                <input type="checkbox" id="enableDense">
-                                Enable Dense Reconstruction
-                            </label>
-                        </div>
-                        <div class="form-group">
-                            <label>Dense Image Size</label>
-                            <select id="maxImageSize">
-                                <option value="1600">1600px</option>
-                                <option value="2400">2400px</option>
-                                <option value="3200" selected>3200px</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>MVS Quality</label>
-                            <select id="mvsQualityMode">
-                                <option value="balanced" selected>Balanced</option>
-                                <option value="quality">Quality</option>
-                                <option value="ultra_sharpness">Ultra Sharpness</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label style="display: flex; align-items: center;">
-                                <input type="checkbox" id="sharpnessBoost">
-                                <span>Ultra Sharpness Boost</span>
-                            </label>
-                            <p style="color: #6e6e73; font-size: 0.8em; margin-top: 4px;">
-                                Adds more detail but takes 2-3x longer
-                            </p>
-                        </div>
-                        <div class="form-group">
-                            <label>Trainer</label>
-                            <select id="trainerType">
-                                <option value="brush" selected>Brush (Default)</option>
-                            </select>
-                        </div>
                     </div>
-                </details>
+                </div>
 
                 <button class="process-btn" id="processBtn" onclick="startProcessing()" disabled>
                     Start Processing
@@ -1018,8 +984,7 @@
                 document.querySelectorAll('.preset-option').forEach(el => {
                     if (el.querySelector('input[name="preset"]')) el.style.display = 'none';
                 });
-                document.querySelector('details').style.display = 'none';
-                document.querySelector('#sharpnessBoost').closest('.info-box').style.display = 'none';
+                document.getElementById('videoControls').style.display = 'none';
 
                 // Show ML-Sharp options
                 document.getElementById('mlsharpOptions').style.display = 'block';
@@ -1040,8 +1005,6 @@
                 document.querySelectorAll('.preset-option').forEach(el => {
                     if (el.querySelector('input[name="preset"]')) el.style.display = 'block';
                 });
-                document.querySelector('details').style.display = 'block';
-                document.querySelector('#sharpnessBoost').closest('.info-box').style.display = 'block';
 
                 document.getElementById('mlsharpOptions').style.display = 'none';
                 document.getElementById('pipelineStages').style.display = 'block';
@@ -1058,60 +1021,49 @@
             radio.addEventListener('change', updateUIForMethod);
         });
 
-        // Add event listeners for preset radio buttons — auto-set dense checkbox
-        document.querySelectorAll('input[name="preset"]').forEach(radio => {
-            radio.addEventListener('change', function() {
-                const enableDense = document.getElementById('enableDense');
-                if (this.value === 'low') {
-                    enableDense.checked = false;
-                } else {
-                    enableDense.checked = true;
-                }
-            });
-        });
 
         function updateTimeEstimates() {
             const numImages = selectedFiles.length;
 
-            // Base times per image (in minutes) - calibrated for RTX 30 series GPU
-            const baseTimes = {
-                low: { min: 0.08, max: 0.15 },      // ~5-9 sec per image
-                medium: { min: 0.2, max: 0.5 },     // ~12-30 sec per image
-                high: { min: 1, max: 2.5 }          // ~1-2.5 min per image
+            // Base times per image (in minutes) — calibrated for RTX 8000
+            const presetMeta = {
+                low:     { steps: '5K',   min: 0.05, max: 0.10 },
+                medium:  { steps: '15K',  min: 0.10, max: 0.25 },
+                high:    { steps: '30K',  min: 0.25, max: 0.60 },
+                quality: { steps: '60K',  min: 0.50, max: 1.20 },
+                expert:  { steps: '100K', min: 0.80, max: 2.00 },
             };
 
-            if (numImages === 0) {
-                // Reset to default estimates
-                document.getElementById('time-low').textContent = ' — 3K steps, ~2-5 min';
-                document.getElementById('time-medium').textContent = ' — 10K steps, ~5-15 min';
-                document.getElementById('time-high').textContent = ' — 30K steps, ~20-60 min';
-                return;
-            }
+            const defaultLabels = {
+                low:     ' — 5K steps, ~2-4 min',
+                medium:  ' — 15K steps, ~8-15 min',
+                high:    ' — 30K steps, ~15-30 min',
+                quality: ' — 60K steps, ~30-60 min',
+                expert:  ' — 100K steps, full lens calibration',
+            };
 
-            // Calculate estimates with GPU speed multiplier
-            for (const [preset, times] of Object.entries(baseTimes)) {
-                const minTime = Math.ceil(times.min * numImages / gpuSpeedMultiplier);
-                const maxTime = Math.ceil(times.max * numImages / gpuSpeedMultiplier);
+            for (const [preset, meta] of Object.entries(presetMeta)) {
+                const el = document.querySelector(`input[name="preset"][value="${preset}"]`);
+                if (!el) continue;
+                const span = el.parentElement.querySelector('span:last-child');
+                if (!span) continue;
 
-                const steps = preset === 'low' ? '3K' : preset === 'medium' ? '10K' : '30K';
+                if (numImages === 0) {
+                    span.textContent = defaultLabels[preset];
+                    continue;
+                }
+
+                const minTime = Math.ceil(meta.min * numImages / gpuSpeedMultiplier);
+                const maxTime = Math.ceil(meta.max * numImages / gpuSpeedMultiplier);
                 let timeStr;
-
                 if (maxTime < 60) {
                     timeStr = `~${minTime}-${maxTime} min`;
                 } else {
-                    const minHours = Math.floor(minTime / 60);
-                    const minMins = minTime % 60;
-                    const maxHours = Math.floor(maxTime / 60);
-                    const maxMins = maxTime % 60;
-
-                    if (minHours === 0) {
-                        timeStr = `~${minMins} min - ${maxHours}h ${maxMins}m`;
-                    } else {
-                        timeStr = `~${minHours}h ${minMins}m - ${maxHours}h ${maxMins}m`;
-                    }
+                    const minH = Math.floor(minTime / 60), minM = minTime % 60;
+                    const maxH = Math.floor(maxTime / 60), maxM = maxTime % 60;
+                    timeStr = minH === 0 ? `~${minM}m - ${maxH}h ${maxM}m` : `~${minH}h ${minM}m - ${maxH}h ${maxM}m`;
                 }
-
-                document.getElementById(`time-${preset}`).textContent = ` — ${steps} steps, ${timeStr} (${numImages} images)`;
+                span.textContent = ` — ${meta.steps} steps, ${timeStr} (${numImages} images)`;
             }
         }
 
@@ -1121,12 +1073,8 @@
             updateTimeEstimates();
             processBtn.disabled = selectedFiles.length === 0;
 
-            // Show/hide video settings based on file types
             const hasVideo = selectedFiles.some(f => f.type.startsWith('video/') || f.name.match(/\.(mp4|avi|mov|mkv|webm)$/i));
-            const videoSettingsGroup = document.getElementById('videoSettingsGroup');
-            const maxFramesGroup = document.getElementById('maxFramesGroup');
-            if (videoSettingsGroup) videoSettingsGroup.style.display = hasVideo ? 'block' : 'none';
-            if (maxFramesGroup) maxFramesGroup.style.display = hasVideo ? 'block' : 'none';
+            document.getElementById('videoControls').style.display = hasVideo ? 'block' : 'none';
         }
 
         function displayFileList() {
@@ -1206,23 +1154,15 @@
             const preset = presetRadio ? presetRadio.value : 'medium';
             formData.append('preset', preset);
 
-            const sharpnessBoost = document.getElementById('sharpnessBoost').checked;
-            formData.append('sharpness_boost', sharpnessBoost ? 'true' : 'false');
+            formData.append('sharpness_boost', 'false');
             formData.append('quality_scale', document.getElementById('qualityScale').value);
-            formData.append('trainer', document.getElementById('trainerType').value);
-
-            formData.append('matcher_type', document.getElementById('matcherType').value);
+            const trainerRadio = document.querySelector('input[name="trainer"]:checked');
+            formData.append('trainer', trainerRadio ? trainerRadio.value : 'brush');
+            formData.append('matcher_type', 'auto');
+            formData.append('enable_dense', 'false');
+            formData.append('mvs_quality_mode', 'balanced');
             formData.append('interval', document.getElementById('interval').value);
             formData.append('max_frames', document.getElementById('maxFrames').value);
-
-            // Always send advanced settings (they're behind a details toggle)
-            const trainingSteps = document.getElementById('trainingSteps').value;
-            if (trainingSteps !== 'default') {
-                formData.append('training_steps', trainingSteps);
-            }
-            formData.append('mvs_quality_mode', document.getElementById('mvsQualityMode').value);
-            formData.append('enable_dense', document.getElementById('enableDense').checked ? 'true' : 'false');
-            formData.append('max_image_size', document.getElementById('maxImageSize').value);
             }
 
             try {
