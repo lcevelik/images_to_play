@@ -54,15 +54,15 @@ COLMAP lives at `C:\COLMAP\bin\colmap.exe`. All DLLs are bundled in `bin/` (4.x 
 | `dense_reconstruction.py` | Fallback MVS — only called when `run_glomap` did NOT run MVS (i.e., `low` preset + dense requested via advanced settings) |
 | `gaussian_splat_utils.py` | Last-resort fallback — generates a basic PLY from sparse reconstruction if Brush fails |
 
-**Do not call `dense_reconstruction.py` for medium/high/sharpness presets** — those presets run MVS inside `run_glomap.py` and calling it again causes workspace conflicts.
+**Do not call `dense_reconstruction.py` when `run_glomap` already ran MVS** (preset JSON has `dense: true`, or `enable_dense_override` forced it) — running MVS twice causes workspace conflicts. Note: all current presets ship `dense: false`, so MVS only ever runs when explicitly requested.
 
 ### Preset system
 
 Presets are defined as JSON files in `simple_splat/App/presets/`. The inline dict in `run_glomap.py` is a fallback only used if the `presets/` directory is missing. `_load_presets()` loads JSON files at runtime.
 
-Available presets: `low`, `medium`, `high`, `ultra`, `extreme`, `insane`, `unlimited`, `expert`, `sharpness`
+Available presets: `low`, `medium`, `high`, `quality`, `expert`
 
-Note: `dense` and `maximum` were removed — `dense` was identical to `unlimited`, and `high` was more aggressive than `maximum`.
+Note: `dense`, `maximum`, `ultra`, `extreme`, `insane`, `unlimited`, and `sharpness` were removed in the preset cleanup — check `presets/*.json` for the current list.
 
 To add or tune a preset: edit the corresponding `.json` file — no Python changes needed.
 
@@ -103,7 +103,8 @@ simple_splat/App/processing/<uuid>/
 Installed in the system Python (3.14). Key packages and their non-obvious requirements:
 - `torch` must be the **CUDA build** (`torch==2.x+cu126`), not `+cpu`. Install with `--index-url https://download.pytorch.org/whl/cu126 --force-reinstall`.
 - `pycolmap` — used only to read reconstruction stats; not required for the pipeline itself.
-- `gsplat` — required by ml-sharp at import time even if rendering is not used.
+- `gsplat` — required by ml-sharp at import time even if rendering is not used. **JIT-compiles its CUDA kernels on first use** — needs MSVC `cl.exe` on PATH (app.py discovers and adds it at startup; for standalone scripts, add `C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\<ver>\bin\Hostx64\x64` to PATH). First compile takes ~10 min; cached afterwards.
+- `pytorch-msssim` — Gaussian-windowed SSIM for the MCMC trainer loss. Do NOT replace with a hand-rolled avg_pool SSIM: its biased border statistics destroy training (verified: 32 dB vs 10.5 dB PSNR on synthetic data).
 
 ### Viewer integration
 
@@ -209,9 +210,13 @@ Elapsed time per stage tracked in `processing_status[job_id]['stages']`. Fronten
 ### Phase 3 — gsplat MCMC Trainer ✅ DONE
 
 #### 3.1 `simple_splat/App/gsplat_mcmc_trainer.py` ✅
-Implements `load_colmap_dataset()` and `train_mcmc()` using gsplat's `MCMCStrategy` and `rasterization()`. Uses `SelectiveAdam` optimizer per parameter group.
+Implements `load_colmap_dataset()` and `train_mcmc()` using gsplat's `MCMCStrategy` and `rasterization()`. Uses `SelectiveAdam` optimizer per parameter group. Hyperparameters follow gsplat's reference `examples/simple_trainer.py` (mcmc preset): per-param LRs, means lr × scene_scale with exponential decay to 1%, opacity/scale L1 regularization (0.01 each — required for MCMC relocation to work), SH degree warmup (one band per 1000 steps).
 
-**Critical:** pycolmap's `image.cam_from_world` is already world-to-camera — do NOT invert.
+**Critical:** pycolmap's `image.cam_from_world` is already world-to-camera (w2c) and gsplat's `rasterization(viewmats=...)` expects w2c — pass it through directly, do NOT invert.
+
+**Critical:** optimizers must be built over the same `ParameterDict` entries used in the render graph — building them over pre-copy tensors leaves `grad=None` and `SelectiveAdam` silently skips the update.
+
+Smoke test: `python test_mcmc_smoke.py` (needs CUDA + MSVC on PATH) — trains a synthetic scene and asserts loss collapse, PSNR gain, and MCMC growth.
 
 #### 3.2 Integration into `app.py` ✅
 Trainer selector in UI: "Brush" (default) / "gsplat MCMC". Branches in `process_images_async()` after COLMAP completes. Falls back to Brush on error.
@@ -220,17 +225,29 @@ Trainer selector in UI: "Brush" (default) / "gsplat MCMC". Branches in `process_
 
 ## Point Cloud Size Reference
 
-| Preset | Sparse points | Dense points (MVS) | Brush Gaussians |
-|--------|--------------|-------------------|-----------------|
-| low    | 10K–100K     | — (disabled)      | 100K–500K       |
-| medium | 50K–500K     | 500K–5M           | 200K–2M         |
-| high   | 200K–2M      | 5M–30M            | 1M–10M          |
-| sharpness | 500K–5M  | 10M–150M          | 2M–30M          |
+| Preset | Sparse points | Brush Gaussians | MCMC Gaussians |
+|--------|--------------|-----------------|----------------|
+| low     | 10K–100K    | 100K–500K       | up to cap |
+| medium  | 50K–500K    | 200K–2M         | up to cap (1M default) |
+| high    | 200K–2M     | 1M–10M          | up to cap |
+| quality / expert | 500K–5M | 2M–30M     | up to cap |
 
-**Maximizing point count:** Use sharpness preset + 100–200 images with 80% overlap. With RTX 8000 (48GB VRAM), `patch_match_stereo` cache can be raised to 44GB (`--PatchMatchStereo.cache_size 44`) and `fusion_min_pixels` lowered to 1 for maximum density.
+MCMC always converges to `mcmc_cap` (default 1,000,000, `config.get('mcmc_cap')` in app.py — no UI knob yet). On the RTX 8000 (48 GB) the cap can safely go to 2–4M.
+
+**Dense MVS:** all presets ship `dense: false` (MVS adds nothing for splat training). If enabled via `enable_dense`, with the RTX 8000 the `patch_match_stereo` cache can be raised to 44GB (`--PatchMatchStereo.cache_size 44`) and `fusion_min_pixels` lowered to 1 for maximum density.
 
 **Image count guide:**
 - <20 images → use `low` preset (high/medium waste time and produce fewer points due to strict filters)
 - 20–50 images → `medium`
 - 50–100 images → `high`
-- 100+ images → `high` or `sharpness`
+- 100+ images → `high` or `quality`
+
+---
+
+## Status Log
+
+**2026-06-12 — MCMC trainer fixed and verified.** The trainer had been broken since inception: (1) c2w passed where gsplat expects w2c, (2) optimizers built over dead tensor copies (`grad=None`, silent no-op), (3) hand-rolled avg-pool SSIM with corrupt border gradients, (4) `export_splats` given activated values where the PLY format stores raw log/logit (splat rendered as giant blobs in viewers). All fixed; hyperparameters aligned to gsplat's reference trainer; LPIPS computed on a 512px crop. Verified: synthetic smoke test 13.4 → 39 dB PSNR, real 74-photo job 25.5 dB mean PSNR, 1M Gaussians, ~13 min training.
+
+**2026-06-12 — GUI redesigned + rebrand.** App renamed **FonixFlow Splat** (directory name `simple_splat/` intentionally unchanged). UI is now tabbed (Create / Settings / Process / Results), no scrolling, auto-switches tabs as the job advances. All element IDs the JS depends on were preserved. Dev preview config in `.claude/launch.json` (name `fonixflow-splat`, port 5000, `autoPort: false` because app.py hardcodes the port).
+
+**Known next steps** (see PROJECT.md): expose `mcmc_cap` in UI, antialiased rasterization + bilateral grid options, VGGT/MASt3R fallback when COLMAP fails, Brush-vs-MCMC benchmark on identical input.

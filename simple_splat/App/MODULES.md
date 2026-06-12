@@ -11,12 +11,20 @@ app.py                  <- Web server + job orchestrator (entry point)
   |
   +-- run_glomap.py     <- COLMAP/GLOMAP pipeline (feature extraction, matching, reconstruction, MVS)
   |
+  +-- gsplat_mcmc_trainer.py   <- gsplat MCMC trainer (used when trainer='mcmc' is selected)
+  |
   +-- dense_reconstruction.py  <- Standalone dense MVS fallback (used only if run_glomap skips MVS)
   |
   +-- gaussian_splat_utils.py  <- PLY fallback (used only if Brush training fails)
+  |
+  +-- camera_tracking.py       <- Camera path export: FBX / GLTF / JSON / Blender script
+  |
+  +-- batch_processing.py      <- Batch job queue (routes registered at startup)
+
+test_mcmc_smoke.py      <- Standalone GPU smoke test for gsplat_mcmc_trainer (not imported by app)
 ```
 
-`app.py` is the only module that imports from the others. The three helper modules do not import from each other.
+`app.py` is the only module that imports from the others. The helper modules do not import from each other.
 
 ---
 
@@ -65,14 +73,16 @@ Step 2 → run_dense_reconstruction()   (from dense_reconstruction.py)
           ONLY called when:
           - preset is 'low' (no MVS in run_glomap)
           - AND enable_dense=True was requested via advanced settings
-          Skipped when run_glomap already ran MVS (medium/high/sharpness presets)
+          Skipped when run_glomap already ran MVS (preset dense:true or enable_dense_override)
 
-Step 3 → subprocess: brush_app.exe    (external binary)
-          Gaussian splat training on the COLMAP output
-          Exports gaussian_splat.ply
+Step 3 → Gaussian splat training (trainer chosen in UI)
+          trainer='mcmc'  → gsplat_mcmc_trainer.train_mcmc() in-process
+                            (falls back to Brush on any error)
+          trainer='brush' → subprocess: brush_app.exe (external binary)
+          Either path exports gaussian_splat.ply
 
 Step 4 → generate_ply_from_colmap()   (from gaussian_splat_utils.py)
-          ONLY called as fallback if Brush fails or is not found
+          ONLY called as fallback if training fails or Brush not found
           Exports basic point cloud from sparse reconstruction
 ```
 
@@ -118,19 +128,26 @@ Alternative processing path for single-image ML-Sharp jobs. Does not use COLMAP 
 | `/kill` | POST | Kills COLMAP/Brush processes via psutil |
 | `/cleanup` | POST | Deletes all job folders |
 | `/cleanup-old` | POST | Deletes folders older than 24h |
+| `/api/camera-tracking` | GET | Export camera path (job_id, format, fps, pointcloud) |
+| `/camera-tracking-info` | GET | Tracking availability for a job |
+| `/download/<job_id>/tracking/<file>` | GET | Download exported tracking files |
+| `/batch/*` | — | Batch queue routes (registered from batch_processing.py) |
 
 ---
 
 ## `run_glomap.py` — COLMAP / GLOMAP Pipeline
 
-**Role:** Runs the complete Structure-from-Motion reconstruction pipeline by calling COLMAP (and optionally GLOMAP) as external processes. Also handles optional dense MVS reconstruction inline for medium/high/sharpness presets.
+**Role:** Runs the complete Structure-from-Motion reconstruction pipeline by calling COLMAP (and optionally GLOMAP) as external processes. Also handles optional dense MVS reconstruction inline when the preset (or `enable_dense_override`) requests it — all current presets ship `dense: false`.
 
 ### Main Function
 
 ```python
 run_colmap(image_path, matcher_type, interval, model_type,
-           detail_level='medium', quality_mode=False, ultra_sharpness_mode=False)
+           detail_level='medium', quality_mode=False, ultra_sharpness_mode=False,
+           enable_dense_override=None, gpu_index=0, mvs_gpu_list=None)
 ```
+
+`enable_dense_override` lets the upload form force MVS on/off regardless of the preset. `gpu_index` / `mvs_gpu_list` support multi-GPU feature extraction and MVS.
 
 Internally runs these COLMAP stages in order:
 
@@ -160,15 +177,17 @@ The `detail_settings` dict maps preset names to COLMAP parameters:
 | `mvs_iterations` | Patch match iterations (more = better convergence) |
 | `mvs_samples` | Patch match random samples (more = better accuracy) |
 
-The three user-visible presets map to:
+Presets are loaded from `presets/*.json` at runtime by `_load_presets()`; the inline `detail_settings` dict is only a fallback if the `presets/` directory is missing. Current presets (all `dense: false` — MVS adds nothing for splat training):
 
-| Preset | `features` | `dense` | MVS window | Approx. points |
-|--------|-----------|---------|------------|---------------|
-| `low` | 16384 | No | — | 50K–200K |
-| `medium` | 32768 | Yes | 5px | 500K–2M |
-| `high` | unlimited | Yes (quality) | 7px | 5M–50M+ |
+| Preset | UI name | Training steps | Notes |
+|--------|---------|---------------|-------|
+| `low` | Fast | 5,000 | quick preview |
+| `medium` | Balanced | 15,000 | default |
+| `high` | High | 30,000 | |
+| `quality` | Quality | 60,000 | |
+| `expert` | Expert | 100,000 | full lens calibration |
 
-Legacy presets (`ultra`, `extreme`, `maximum`, `insane`, `unlimited`, `dense`, `expert`, `sharpness`) are kept for backward compatibility with advanced settings.
+To add or tune a preset, edit the corresponding `.json` file — no Python changes needed.
 
 ### GLOMAP vs COLMAP Mapper
 
@@ -214,7 +233,7 @@ python run_glomap.py \
 
 **Role:** A self-contained dense reconstruction module. Used by `app.py` as a **fallback** when `run_glomap.py` did not run MVS (e.g., the `low` preset was selected but the user enabled dense via advanced settings).
 
-> **Important:** For `medium`, `high`, and `sharpness` presets, `run_glomap.py` handles MVS internally. `app.py` explicitly skips calling this module in those cases to avoid double-processing and workspace conflicts.
+> **Important:** When MVS is requested (preset `dense: true` or `enable_dense_override`), `run_glomap.py` handles it internally. `app.py` explicitly skips calling this module in those cases to avoid double-processing and workspace conflicts. All current presets ship `dense: false`.
 
 ### Main Function
 
@@ -286,6 +305,61 @@ Low-level PLY writer. Writes an ASCII PLY file from a list of `[x, y, z]` points
 
 ---
 
+## `gsplat_mcmc_trainer.py` — gsplat MCMC Trainer
+
+**Role:** Alternative Gaussian splat trainer (UI: Settings → Trainer → MCMC). Trains in-process with gsplat's `MCMCStrategy` instead of spawning Brush. Rewritten and verified 2026-06-12 (25.5 dB PSNR on a real 74-photo capture).
+
+### Functions
+
+| Function | Purpose |
+|----------|---------|
+| `load_colmap_dataset(parent_dir)` | Reads `sparse/0/` via pycolmap + undistorted `images/`. Returns cameras, **w2c** matrices, CPU image tensors, sparse points |
+| `init_gaussians_from_sparse(xyz, rgb, sh_degree)` | Init: knn-based per-point scales, random quats, opacity 0.5, SH-DC from RGB |
+| `train_mcmc(parent_dir, total_steps, cap_max, sh_degree, use_lpips, progress_callback, output_ply_path)` | Full training loop; returns PLY path or None |
+
+### Training details (match gsplat's reference `examples/simple_trainer.py`, mcmc preset)
+
+- Per-param learning rates; means lr = `1.6e-4 × scene_scale`, exponential decay to 1%
+- Loss: `0.8·L1 + 0.2·SSIM` (pytorch-msssim) `+ 0.01·opacity_reg + 0.01·scale_reg` (regs drive MCMC relocation) `+ 0.05·LPIPS` on a random 512px crop (if enabled)
+- SH degree warmup: one band per 1000 steps
+- `SelectiveAdam` with packed-mode visibility masks from `info["gaussian_ids"]`
+- `MCMCStrategy(cap_max, refine 500 → 85% of steps, every 100)`
+
+### Conventions that MUST hold (each was a past bug)
+
+1. pycolmap `cam_from_world` is **w2c** and gsplat `rasterization(viewmats=)` expects **w2c** — pass through, never invert
+2. Optimizers must be built over the **same** `ParameterDict` entries used in the render graph
+3. SSIM must be Gaussian-windowed (`pytorch_msssim`) — avg-pool SSIM has corrupt border gradients
+4. `export_splats` writes values **verbatim**: pass RAW log-scales / logit-opacities, not activated values
+
+### Verification
+
+`test_mcmc_smoke.py` — builds a synthetic Gaussian scene, renders GT views, runs the real `train_mcmc()` loop (monkeypatched loader), asserts loss collapse, ≥6 dB PSNR gain, MCMC growth, and that the exported PLY **reloaded viewer-style** renders within 6 dB of training quality (catches export-format bugs). Needs CUDA + MSVC on PATH.
+
+---
+
+## `camera_tracking.py` — Camera Path Export
+
+**Role:** Extracts the per-image camera poses from the COLMAP reconstruction and exports them as animation-ready camera paths. Called by `app.py` route `/api/camera-tracking` (UI: Results tab → Camera Tracking Export).
+
+| Function | Output |
+|----------|--------|
+| `export_camera_json(poses, path, fps)` | `cameras.json` |
+| `export_camera_gltf(poses, path, fps)` | `cameras.gltf` (animated camera) |
+| `export_camera_fbx(poses, path, fps)` | `cameras.fbx` (ASCII FBX) |
+| Blender export | `import_camera.py` script |
+| Optional point cloud | `sparse_cloud.ply` |
+
+Downloads served from `/download/<job_id>/tracking/<file>`.
+
+---
+
+## `batch_processing.py` — Batch Job Queue
+
+**Role:** Queue multiple capture folders for sequential processing. `register_batch_routes(app, ...)` is called at startup in `app.py`, exposing `/batch/*` routes backed by a `BatchQueue` worker.
+
+---
+
 ## How the Modules Work Together — Full Processing Flow
 
 ```
@@ -307,7 +381,7 @@ Thread: process_images_async()
       ├─ COLMAP/GLOMAP mapper      (3D reconstruction → sparse/0/)
       ├─ COLMAP image_undistorter  (→ images/ + sparse/ in parent_dir)
       │
-      └─ If preset is medium/high/sharpness:
+      └─ If MVS requested (preset dense:true or enable_dense_override):
          ├─ COLMAP patch_match_stereo  (GPU depth maps → dense/stereo/)
          └─ COLMAP stereo_fusion       (fused point cloud → dense/fused.ply)
 
@@ -318,8 +392,11 @@ Thread: process_images_async()
       ├─ COLMAP patch_match_stereo
       └─ COLMAP stereo_fusion → dense/fused.ply
 
-  [3] Calls Brush as subprocess:
-      brush_app.exe <parent_dir> --total-steps N --export-path <parent_dir>
+  [3] Training (trainer selected in UI):
+      mcmc  → gsplat_mcmc_trainer.train_mcmc(parent_dir, ...)  in-process
+              └─ falls back to Brush on any exception
+      brush → brush_app.exe <parent_dir> --total-steps N --export-path <parent_dir>
+              └─ stdout streamed for live step progress
       │
       └─ Trains Gaussian splat → gaussian_splat.ply
 

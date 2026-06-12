@@ -1,7 +1,31 @@
 # images_to_play — Feature Roadmap & Code Review
 
-> Generated: 2026-05-27 | Updated: 2026-05-28
-> Status: **Plan only** — no code changes
+> Generated: 2026-05-27 | Updated: 2026-06-12
+> Status: historical plan + audits. The 2026-05-28 audit below is **partially stale** — read the 2026-06-12 update first.
+
+---
+
+## Status Update (2026-06-12)
+
+Items from the 2026-05-28 audit that are now RESOLVED:
+
+| Old item | Now |
+|----------|-----|
+| 1.1 Brush stdout streaming "BROKEN" | **FIXED** — `subprocess.Popen` with live step parsing in app.py |
+| 1.2 COLMAP path caching "MISSING" | **FIXED** — `run_glomap.get_colmap_path()` cached, app.py reuses it |
+| 1.7 gsplat trainer "all images on GPU at once" | **FIXED** — images stay on CPU; only the current step's image moves to GPU |
+| 1.16 mlsharpDevice JS bug | **FIXED** — element exists in the tabbed UI (2026-06-12 redesign) |
+| 2.1 Batch routes "not wired up" | **WIRED** — `register_batch_routes(...)` called at app startup |
+| §3 Camera tracking | **SHIPPED** — `camera_tracking.py` + `/api/camera-tracking` + Results-tab UI (FBX/GLTF/JSON/Blender) |
+
+Major work done since the audit (not in the original roadmap):
+
+- **gsplat MCMC trainer rewritten and verified** — four latent bugs fixed (camera convention, optimizer wiring, SSIM gradients, PLY export format); hyperparameters aligned to gsplat reference; smoke test added. Verified 25.5 dB PSNR on a real 74-photo capture.
+- **GUI redesigned** — tabbed layout (Create / Settings / Process / Results), no scrolling, auto tab-switching, modern dark theme.
+- **Rebranded** to FonixFlow Splat.
+- Preset system consolidated to 5 JSON presets (low/medium/high/quality/expert), all sparse-only.
+
+Still-valid open items from the audit: 1.3 parallel image resize, 1.4/1.5 blur-filter efficiency, 1.6 multi-camera auto-detect, 1.9 MVS cache_size auto-detection, 1.10 shell=True usage, 1.12 in-memory job status, and the batch module's HTTP-self-upload design issue. Current priorities live in **PROJECT.md**.
 
 ---
 

@@ -3,6 +3,8 @@
 > Based on: Polyfjord's automated photogrammetry tracking workflow
 > Source: https://youtube.com/polyfjord
 
+> **STATUS (2026-06-12): core export SHIPPED.** `camera_tracking.py` exports FBX / GLTF / JSON / Blender-script camera paths from any completed job, served via `/api/camera-tracking` with download buttons in the Results tab. The rest of this document is the original research/plan, kept for reference (FFmpeg-based extraction and the full matchmoving workflow remain unimplemented ideas).
+
 ---
 
 ## What the Polyfjord Script Does (Step by Step)

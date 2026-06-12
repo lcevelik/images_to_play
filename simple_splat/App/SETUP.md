@@ -1,4 +1,4 @@
-# Gaussian Splatting App - Setup & Troubleshooting
+# FonixFlow Splat — Setup & Troubleshooting
 
 This is a **fully standalone** package. Everything is bundled — Python, COLMAP, Brush, all pip dependencies, and the 3D viewer. No external software installation or internet connection required.
 
@@ -142,7 +142,7 @@ This package is fully self-contained and self-relocating:
 
 ### Out of memory
 
-- Use **Low** preset (sparse only, 3K training steps)
+- Use **Fast** preset (sparse only, 5K training steps)
 - Reduce image count (50-100 images is usually sufficient)
 - Close other GPU-intensive applications
 - For VRAM limits: Lower preset = lower VRAM usage
@@ -157,6 +157,29 @@ This package is fully self-contained and self-relocating:
 
 - Click **Cleanup** in the web UI, or POST to http://localhost:5000/cleanup
 - Processing folders in `App\processing\` are also auto-deleted after 24 hours
+
+---
+
+## Optional: gsplat MCMC Trainer
+
+The app offers a second trainer besides Brush: **gsplat MCMC** (selectable in Settings). It runs in-process in Python and needs extra packages that are NOT in the bundled wheels:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu126   # CUDA build required
+pip install gsplat pytorch-msssim scipy plyfile
+pip install lpips   # optional perceptual loss
+```
+
+Requirements and gotchas:
+- **CUDA GPU required** — there is no CPU path for the MCMC trainer
+- **torch must be the CUDA build** (`+cu126`). A `+cpu` torch fails silently into the Brush fallback
+- **gsplat JIT-compiles its CUDA kernels on first use** — MSVC `cl.exe` and the CUDA toolkit (nvcc) must be available. `app.py` auto-discovers Visual Studio's `cl.exe` at startup and adds it to PATH. The first training run triggers a ~10 minute one-time kernel compile; later runs start instantly
+- If any of this is missing, MCMC jobs log a warning and **fall back to Brush automatically** — the job still completes
+
+Verify the trainer end-to-end with the smoke test (trains a synthetic scene, ~2 min):
+```bash
+python test_mcmc_smoke.py
+```
 
 ---
 

@@ -1,4 +1,4 @@
-# Gaussian Splatting App - Standalone Edition
+# FonixFlow Splat — Standalone Edition
 
 A web application that converts images or video into 3D Gaussian Splats using COLMAP and Brush, with an integrated browser-based viewer powered by PlayCanvas SuperSplat.
 
@@ -17,13 +17,15 @@ This is a **fully standalone package** — Python, COLMAP, Brush, all Python dep
 
 ## Features
 
+- **Tabbed UI**: Create / Settings / Process / Results — auto-switches as the job advances
 - **Image Upload**: Individual images (JPG/PNG), video files (MP4/MOV/AVI/MKV/WEBM), or ZIP archives
 - **Video Frame Extraction**: Automatically extracts frames from video at configurable intervals
-- **3 Quality Presets**: Low (fast preview), Medium (balanced), High (maximum quality)
-- **Advanced Controls**: Fine-tune training steps, MVS quality mode, resolution, dense reconstruction
-- **Dense Reconstruction**: Optional COLMAP MVS for millions of points (medium/high presets)
-- **Gaussian Splat Training**: Brush MCMC-based trainer for high-quality `.ply` output
-- **Browser Viewer**: PlayCanvas SuperSplat v1.15.0 (WebGPU-accelerated, no install needed)
+- **5 Quality Presets**: Fast (5K steps), Balanced (15K), High (30K), Quality (60K), Expert (100K)
+- **Quality Scale**: Draft (0.3×) / Standard (1×) / Cinematic (2×) multiplier on training steps
+- **Two Trainers**: Brush (standard 3DGS, default) or gsplat MCMC (1M Gaussian cap, LPIPS loss, often higher quality)
+- **Dense Reconstruction**: Optional COLMAP MVS for millions of points (off by default; toggle via upload form)
+- **Camera Tracking Export**: FBX / GLTF / JSON / Blender script camera paths from the results panel
+- **Browser Viewer**: PlayCanvas SuperSplat (WebGPU-accelerated, no install needed)
 - **Open Splat File**: Upload an existing `.ply` or `.splat` file for direct viewing
 - **Download**: Export the trained `.ply` file or sparse reconstruction `.zip`
 - **Real-time Logs**: Live processing log viewer at http://localhost:5000/logs
@@ -57,12 +59,13 @@ The 3D viewer requires WebGPU. Use Chrome or Edge 113+. You can verify at `chrom
         |
 4. Sparse Reconstruction (COLMAP mapper)
         |
-5. Dense MVS Reconstruction (optional, medium/high presets)
+5. Dense MVS Reconstruction (optional, off by default)
    - Patch Match Stereo -> depth maps
    - Stereo Fusion -> dense point cloud (fused.ply)
         |
-6. Gaussian Splat Training (Brush)
-   - MCMC-based 3DGS training
+6. Gaussian Splat Training (user choice)
+   - Brush: standard 3DGS clone/split densification
+   - gsplat MCMC: stochastic relocation, 1M Gaussian cap, LPIPS loss
    - Exports gaussian_splat.ply
         |
 7. View in Browser (PlayCanvas SuperSplat, WebGPU)
@@ -72,13 +75,15 @@ The 3D viewer requires WebGPU. Use Chrome or Edge 113+. You can verify at `chrom
 
 ## Quality Presets
 
-| Preset | Training Steps | Dense MVS | Max Resolution | Est. Time |
-|--------|---------------|-----------|----------------|-----------|
-| Low | 3,000 | No | 1600px | 2-5 min |
-| Medium | 10,000 | Yes (balanced) | 3200px | 10-30 min |
-| High | 30,000 | Yes (quality mode) | 4800px | 30-90 min |
+| Preset | Training Steps | Dense MVS | Est. Time |
+|--------|---------------|-----------|-----------|
+| Fast (`low`) | 5,000 | No | ~2-4 min |
+| Balanced (`medium`) | 15,000 | No | ~8-15 min |
+| High (`high`) | 30,000 | No | ~15-30 min |
+| Quality (`quality`) | 60,000 | No | ~30-60 min |
+| Expert (`expert`) | 100,000 | No | full lens calibration, longest |
 
-**Advanced settings** allow full control: up to 200,000 training steps, 6400px resolution, ultra sharpness MVS mode.
+Preset COLMAP parameters live in `presets/*.json` — edit the JSON to tune a preset, no code changes needed. Dense MVS is off by default for all presets (no benefit for splat training); enable it via the `enable_dense` upload field. The **Quality Scale** setting (Draft 0.3× / Standard 1× / Cinematic 2×) multiplies the preset's training steps.
 
 ---
 
@@ -99,6 +104,11 @@ GaussianSplatting_Standalone\
     +-- run_glomap.py              <- COLMAP pipeline runner
     +-- dense_reconstruction.py    <- Dense MVS module
     +-- gaussian_splat_utils.py    <- PLY generation utilities
+    +-- gsplat_mcmc_trainer.py     <- gsplat MCMC trainer (alternative to Brush)
+    +-- test_mcmc_smoke.py         <- MCMC trainer smoke test (synthetic scene, needs CUDA)
+    +-- camera_tracking.py         <- Camera path export (FBX/GLTF/JSON/Blender)
+    +-- batch_processing.py        <- Batch job queue
+    +-- presets\*.json             <- Quality preset definitions (editable)
     +-- requirements.txt           <- Python dependency list
     +-- README.md                  <- This file
     +-- SETUP.md                   <- Troubleshooting guide
@@ -150,6 +160,16 @@ Installed offline from bundled wheels on first run. No internet required.
 | numpy | 2.4.2 | Numerical operations (pycolmap dep) |
 | + transitive deps | | blinker, click, itsdangerous, jinja2, markupsafe, colorama |
 
+**Additional requirements for the gsplat MCMC trainer** (optional — Brush works without these):
+
+| Package | Notes |
+|---------|-------|
+| torch (CUDA build) | Must be `+cu126`, not `+cpu` |
+| gsplat | JIT-compiles CUDA kernels on first use — needs MSVC `cl.exe` on PATH (app.py auto-discovers it at startup); first compile ~10 min, cached afterwards |
+| pytorch-msssim | Gaussian-windowed SSIM loss (do NOT substitute a hand-rolled avg-pool SSIM — it destroys training) |
+| lpips | Optional perceptual loss (used for all presets except Fast) |
+| scipy, plyfile | Init scales / PLY handling |
+
 ---
 
 ## API Endpoints
@@ -166,6 +186,10 @@ Installed offline from bundled wheels on first run. No internet required.
 | `/upload-for-view` | POST | Upload existing .ply/.splat for direct viewing |
 | `/logs` | GET | Live log viewer page |
 | `/logs/stream` | GET | Server-Sent Events log stream |
+| `/logs/json/<job_id>` | GET | Per-job log entries as JSON |
+| `/api/camera-tracking` | GET | Export camera path (params: job_id, format, fps, pointcloud) |
+| `/camera-tracking-info` | GET | Camera tracking availability for a job |
+| `/download/<job_id>/tracking/<file>` | GET | Download exported tracking files |
 | `/gpu-info` | GET | GPU detection for time estimates |
 | `/mlsharp-info` | GET | ML-Sharp installation status |
 | `/kill` | POST | Kill running COLMAP/Brush processes |
@@ -177,8 +201,8 @@ Installed offline from bundled wheels on first run. No internet required.
 
 The viewer is **PlayCanvas SuperSplat v1.15.0**, powered by PlayCanvas Engine v2.16.1.
 
-- Accessed at: `http://localhost:5000/static/supersplat/index.html?content=/ply/<job_id>&webgpu`
-- Loads `.ply` Gaussian splat files via the `?content=` URL parameter
+- Accessed at: `http://localhost:5000/static/supersplat/index.html?load=/ply/<job_id>.ply`
+- Loads `.ply` Gaussian splat files via the `?load=` URL parameter (also supports `?focal=x,y,z`, `?angles=az,elev`, `?distance=n`)
 - Requires a WebGPU-capable browser (Chrome/Edge 113+)
 - Fully offline — all viewer assets are bundled locally, including WebXR controller profiles
 - Default camera: 2 metres from origin, facing center (configurable in `static/supersplat/settings.json`)
@@ -251,6 +275,8 @@ Without Brush the pipeline still completes — it falls back to exporting a basi
 ## Acknowledgements
 
 - [COLMAP](https://github.com/colmap/colmap) - Structure-from-Motion and MVS pipeline
-- [Brush](https://github.com/ArthurBrussee/brush) - MCMC-based 3D Gaussian Splatting trainer
+- [Brush](https://github.com/ArthurBrussee/brush) - 3D Gaussian Splatting trainer (Vulkan/WGPU)
+- [gsplat](https://github.com/nerfstudio-project/gsplat) - CUDA rasterizer + MCMC strategy used by the built-in trainer
+- [3DGS-MCMC](https://github.com/ubc-vision/3dgs-mcmc) - MCMC densification strategy (NeurIPS 2024)
 - [PlayCanvas SuperSplat](https://github.com/playcanvas/supersplat) - Browser-based 3DGS viewer
 - [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) - Original research paper
