@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fonixflow-splat",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["simple_splat/App/app.py"],
+      "port": 5000,
+      "autoPort": false
+    }
+  ]
+}
