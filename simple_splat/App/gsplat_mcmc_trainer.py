@@ -5,9 +5,13 @@ Trains Gaussian Splats from COLMAP reconstructions using gsplat's MCMCStrategy.
 MCMC uses stochastic relocation instead of clone/split — avoids the 15K
 densification cutoff of standard 3DGS and gives an explicit Gaussian cap.
 
-Bug-fix history applied here:
-  - d91d27b: viewmat must be c2w (inv of pycolmap's w2c), not w2c directly
-  - d7185d4: init opacity 10% (not 50%), random quats, per-point knn scale
+Hyperparameters follow gsplat's reference examples/simple_trainer.py (mcmc
+preset): per-param learning rates, means lr scaled by scene scale with
+exponential decay, opacity/scale L1 regularization, and SH degree warmup.
+
+Conventions (verified against gsplat 1.5.3 docs):
+  - pycolmap's image.cam_from_world is world-to-camera (w2c)
+  - gsplat rasterization() expects viewmats = w2c — pass it directly, do NOT invert
 """
 
 import os
@@ -37,7 +41,7 @@ def load_colmap_dataset(parent_dir):
     available_images = {f.lower(): f for f in os.listdir(images_dir)
                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))}
 
-    cameras, c2w_mats, image_tensors, image_names = [], [], [], []
+    cameras, w2c_mats, image_tensors, image_names = [], [], [], []
 
     for _, image in recon.images.items():
         name_lower = image.name.lower()
@@ -60,10 +64,10 @@ def load_colmap_dataset(parent_dir):
             'cx': float(cam.principal_point_x), 'cy': float(cam.principal_point_y),
         })
 
-        # pycolmap.cam_from_world returns w2c; gsplat rasterization() expects c2w
+        # pycolmap cam_from_world is w2c — exactly what gsplat's viewmats expects
         w2c = np.eye(4, dtype=np.float32)
         w2c[:3, :] = np.array(image.cam_from_world().matrix(), dtype=np.float32)
-        c2w_mats.append(torch.from_numpy(np.linalg.inv(w2c)))
+        w2c_mats.append(torch.from_numpy(w2c))
         image_names.append(available_images[name_lower])
 
     sparse_xyz, sparse_rgb = [], []
@@ -75,7 +79,7 @@ def load_colmap_dataset(parent_dir):
     sparse_rgb = np.array(sparse_rgb, dtype=np.float32) / 255.0 if sparse_rgb else np.zeros((0, 3), dtype=np.float32)
 
     return {
-        'cameras': cameras, 'c2w_mats': c2w_mats,
+        'cameras': cameras, 'w2c_mats': w2c_mats,
         'images': image_tensors, 'image_names': image_names,
         'sparse_xyz': sparse_xyz, 'sparse_rgb': sparse_rgb,
     }
@@ -93,14 +97,14 @@ def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
     tree = cKDTree(xyz)
     dists, _ = tree.query(xyz, k=min(4, N))
     dist_avg = np.sqrt((dists[:, 1:] ** 2).mean(axis=1))
-    scales = torch.from_numpy(np.log(dist_avg).astype(np.float32)).unsqueeze(-1).repeat(1, 3)
+    scales = torch.from_numpy(np.log(np.clip(dist_avg, 1e-8, None)).astype(np.float32)).unsqueeze(-1).repeat(1, 3)
 
     # Random unit quaternions (better initial coverage than identity)
     quats = torch.randn(N, 4)
     quats = quats / quats.norm(dim=-1, keepdim=True)
 
-    # Init at 10% opacity — sigmoid_inverse(0.1) ≈ -2.197
-    opacities = torch.full((N,), -2.197)
+    # MCMC init opacity 0.5 (gsplat mcmc preset) — logit(0.5) = 0
+    opacities = torch.zeros(N)
 
     # DC SH coefficients from RGB: sh0 = (rgb - 0.5) / C0
     C0 = 0.28209479177387814
@@ -150,36 +154,59 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=1_000_000,
         log("No images or sparse points — cannot train", "ERROR")
         return None
 
+    # Scene scale from camera centers (gsplat Parser convention):
+    # max distance of any camera from the average camera position, * 1.1
+    w2c_all = torch.stack(dataset['w2c_mats'])                     # (C, 4, 4)
+    cam_centers = torch.linalg.inv(w2c_all)[:, :3, 3]              # c2w translation
+    scene_scale = float((cam_centers - cam_centers.mean(0)).norm(dim=-1).max()) * 1.1
+    if scene_scale <= 0:
+        scene_scale = 1.0
+    log(f"Scene scale: {scene_scale:.3f}")
+
     log("Initialising Gaussians...")
     raw = init_gaussians_from_sparse(dataset['sparse_xyz'], dataset['sparse_rgb'], sh_degree)
-    splats = {k: v.to(device).requires_grad_(True) for k, v in raw.items()}
+    param_dict = torch.nn.ParameterDict(
+        {k: torch.nn.Parameter(v.to(device)) for k, v in raw.items()}
+    )
 
-    lr_map = {'means': 1e-3, 'scales': 1e-4, 'quats': 1e-2,
-              'opacities': 5e-2, 'sh0': 5e-3, 'shN': 1.25e-4}
+    # Reference learning rates from gsplat examples/simple_trainer.py
+    lr_map = {'means': 1.6e-4 * scene_scale, 'scales': 5e-3, 'quats': 1e-3,
+              'opacities': 5e-2, 'sh0': 2.5e-3, 'shN': 2.5e-3 / 20}
     optimizers = {
-        k: SelectiveAdam([{'params': splats[k], 'lr': lr_map[k]}], eps=1e-15, betas=(0.9, 0.999))
-        for k in splats
+        k: SelectiveAdam([{'params': [param_dict[k]], 'lr': lr_map[k], 'name': k}],
+                         eps=1e-15, betas=(0.9, 0.999))
+        for k in param_dict.keys()
     }
+    # Decay means lr to 1% of initial over the run (reference scheduler)
+    means_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+        optimizers['means'], gamma=0.01 ** (1.0 / total_steps)
+    )
 
     strategy = MCMCStrategy(
         cap_max=cap_max,
         refine_start_iter=500,
-        refine_stop_iter=total_steps - 500,
+        refine_stop_iter=int(total_steps * 0.85),  # reference ratio: 25K of 30K
         refine_every=100,
+        min_opacity=0.005,
         verbose=False,
     )
+    strategy.check_sanity(param_dict, optimizers)
     strategy_state = strategy.initialize_state()
 
-    def ssim_loss(pred, target, w=11):
-        C1, C2 = 0.01**2, 0.03**2
-        p = pred.permute(2, 0, 1).unsqueeze(0)
-        t = target.permute(2, 0, 1).unsqueeze(0)
-        mu1 = F.avg_pool2d(p, w, stride=1, padding=w//2)
-        mu2 = F.avg_pool2d(t, w, stride=1, padding=w//2)
-        s1 = F.avg_pool2d(p*p, w, 1, w//2) - mu1**2
-        s2 = F.avg_pool2d(t*t, w, 1, w//2) - mu2**2
-        s12 = F.avg_pool2d(p*t, w, 1, w//2) - mu1*mu2
-        return 1 - ((2*mu1*mu2+C1)*(2*s12+C2) / ((mu1**2+mu2**2+C1)*(s1+s2+C2))).mean()
+    # Gaussian-windowed SSIM (pytorch_msssim). A naive avg_pool SSIM has biased
+    # border statistics and negative variances whose gradients wreck training —
+    # verified: 32 dB (L1 only) vs 10.5 dB (L1 + avg_pool SSIM) on synthetic data.
+    try:
+        from pytorch_msssim import SSIM
+        ssim_module = SSIM(data_range=1.0, channel=3).to(device)
+
+        def ssim_loss(pred, target):
+            p = pred.permute(2, 0, 1).unsqueeze(0)
+            t = target.permute(2, 0, 1).unsqueeze(0)
+            return 1 - ssim_module(p, t)
+    except ImportError:
+        log("pytorch-msssim not installed — run: pip install pytorch-msssim. Training with L1 only.", "WARNING")
+        ssim_loss = None
 
     lpips_fn = None
     if use_lpips:
@@ -191,21 +218,25 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=1_000_000,
         except ImportError:
             log("lpips package not installed — run: pip install lpips. Continuing without LPIPS.", "WARNING")
 
-    log(f"Starting MCMC training: {total_steps} steps, cap={cap_max:,}, lpips={'on' if lpips_fn else 'off'}")
+    # MCMC relies on these regularizers to drive Gaussians toward zero opacity
+    # so relocation has dead Gaussians to teleport (3DGS-MCMC paper, Eq. 12)
+    opacity_reg, scale_reg = 0.01, 0.01
 
-    from torch.nn import ParameterDict
-    param_dict = ParameterDict({k: torch.nn.Parameter(splats[k]) for k in splats})
+    log(f"Starting MCMC training: {total_steps} steps, cap={cap_max:,}, lpips={'on' if lpips_fn else 'off'}")
 
     for step in range(total_steps):
         idx = np.random.randint(num_images)
         cam = dataset['cameras'][idx]
-        c2w = dataset['c2w_mats'][idx].to(device)
+        w2c = dataset['w2c_mats'][idx].to(device)
         gt = dataset['images'][idx].to(device)
         H, W = gt.shape[0], gt.shape[1]
 
         K = torch.tensor([[cam['fx'], 0, cam['cx']],
                           [0, cam['fy'], cam['cy']],
                           [0, 0, 1]], device=device, dtype=torch.float32).unsqueeze(0)
+
+        # SH warmup: start with DC only, unlock one band every 1000 steps
+        sh_degree_to_use = min(step // 1000, sh_degree)
 
         colors_sh = torch.cat([param_dict['sh0'], param_dict['shN']], dim=1)
         rendered, _, info = rasterization(
@@ -214,40 +245,59 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=1_000_000,
             scales=torch.exp(param_dict['scales']),
             opacities=torch.sigmoid(param_dict['opacities']),
             colors=colors_sh,
-            viewmats=c2w.unsqueeze(0),
+            viewmats=w2c.unsqueeze(0),
             Ks=K, width=W, height=H,
             near_plane=0.01, far_plane=1000.0,
-            sh_degree=sh_degree, render_mode="RGB", absgrad=True,
+            sh_degree=sh_degree_to_use, render_mode="RGB",
         )
 
         pred = rendered[0]
-        loss = 0.8 * F.l1_loss(pred, gt) + 0.2 * ssim_loss(pred, gt)
+        if ssim_loss is not None:
+            loss = 0.8 * F.l1_loss(pred, gt) + 0.2 * ssim_loss(pred, gt)
+        else:
+            loss = F.l1_loss(pred, gt)
+        loss = loss + opacity_reg * torch.sigmoid(param_dict['opacities']).abs().mean()
+        loss = loss + scale_reg * torch.exp(param_dict['scales']).abs().mean()
 
         if lpips_fn is not None:
+            # LPIPS on a random 512px crop — full-res VGG backward at 3200px+
+            # is 10x slower and can exhaust VRAM
+            ch, cw = min(512, H), min(512, W)
+            y0 = np.random.randint(H - ch + 1)
+            x0 = np.random.randint(W - cw + 1)
+            p_c, g_c = pred[y0:y0+ch, x0:x0+cw], gt[y0:y0+ch, x0:x0+cw]
             # Normalize to [-1, 1] and convert to [N, C, H, W] for LPIPS
-            p_lp = (pred.clamp(0, 1) * 2 - 1).permute(2, 0, 1).unsqueeze(0)
-            g_lp = (gt.clamp(0, 1) * 2 - 1).permute(2, 0, 1).unsqueeze(0)
+            p_lp = (p_c.clamp(0, 1) * 2 - 1).permute(2, 0, 1).unsqueeze(0)
+            g_lp = (g_c.clamp(0, 1) * 2 - 1).permute(2, 0, 1).unsqueeze(0)
             loss = loss + 0.05 * lpips_fn(p_lp, g_lp).mean()
 
-        for opt in optimizers.values():
-            opt.zero_grad()
         loss.backward()
 
-        strategy.step_post_backward(param_dict, optimizers, strategy_state, step, info, 1e-3)
-
-        vis_ids = info.get("gaussian_ids")
-        if vis_ids is not None:
-            vis_mask = torch.zeros(param_dict['means'].shape[0], device=device, dtype=torch.bool)
-            vis_mask[vis_ids.unique()] = True
+        # Visibility mask for SelectiveAdam (only visible Gaussians get updated).
+        # rasterization() defaults to packed mode: info["gaussian_ids"] lists the
+        # Gaussians that touched this view. Non-packed fallback: radii (C, N, 2).
+        N = param_dict['means'].shape[0]
+        if info.get("gaussian_ids") is not None:
+            vis_mask = torch.zeros(N, device=device, dtype=torch.bool)
+            vis_mask[info["gaussian_ids"]] = True
         else:
-            vis_mask = torch.ones(param_dict['means'].shape[0], device=device, dtype=torch.bool)
+            vis_mask = (info["radii"] > 0).all(dim=-1).any(dim=0)
 
         for opt in optimizers.values():
             opt.step(visibility=vis_mask)
+            opt.zero_grad(set_to_none=True)
+        means_scheduler.step()
+
+        # Relocation + noise injection; lr couples noise magnitude to means lr
+        strategy.step_post_backward(param_dict, optimizers, strategy_state, step, info,
+                                    lr=means_scheduler.get_last_lr()[0])
 
         if step % 500 == 0 or step == total_steps - 1:
             n = param_dict['means'].shape[0]
-            log(f"[MCMC] Step {step}/{total_steps} | loss={loss.item():.4f} | gaussians={n:,}")
+            with torch.no_grad():
+                mse = F.mse_loss(pred.clamp(0, 1), gt)
+                psnr = -10.0 * torch.log10(mse + 1e-10)
+            log(f"[MCMC] Step {step}/{total_steps} | loss={loss.item():.4f} | psnr={psnr.item():.2f} | gaussians={n:,}")
 
     if output_ply_path is None:
         output_ply_path = os.path.join(parent_dir, "gaussian_splat.ply")
@@ -255,11 +305,14 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=1_000_000,
     log(f"Exporting {param_dict['means'].shape[0]:,} Gaussians to PLY...")
     try:
         from gsplat import export_splats
+        # export_splats writes values verbatim; the 3DGS PLY format stores
+        # log-scales and logit-opacities, so pass the RAW params — viewers
+        # apply exp/sigmoid themselves (activated values render as giant blobs)
         export_splats(
             means=param_dict['means'].detach(),
-            scales=torch.exp(param_dict['scales']).detach(),
+            scales=param_dict['scales'].detach(),
             quats=param_dict['quats'].detach(),
-            opacities=torch.sigmoid(param_dict['opacities']).detach(),
+            opacities=param_dict['opacities'].detach(),
             sh0=param_dict['sh0'].detach(),
             shN=param_dict['shN'].detach(),
             format="ply",

@@ -35,3 +35,4 @@ numpy==2.4.2
 #   cd ml-sharp && pip install -r requirements.txt
 #   sharp --version
 # ---------------------------------------------------------------------------
+pytorch-msssim
