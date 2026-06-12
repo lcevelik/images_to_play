@@ -3,7 +3,7 @@ Test runner: submits all presets to the Flask API sequentially,
 waits for completion, copies PLY to named result folders.
 
 Results are viewable at:
-  http://localhost:5000/static/supersplat/index.html?load=/ply/result_<preset>
+  http://localhost:5000/static/supersplat/index.html?load=/ply/result_<preset>.ply
 """
 
 import os
@@ -136,7 +136,7 @@ def main():
     print(f"Results: {PROCESSING_DIR}/result_<label>/gaussian_splat.ply")
     print(f"\nViewer URLs (open after each completes):")
     for label, *_ in TESTS:
-        print(f"  http://localhost:5000/static/supersplat/index.html?load=/ply/result_{label}")
+        print(f"  http://localhost:5000/static/supersplat/index.html?load=/ply/result_{label}.ply")
 
     summary = []
     total_start = time.time()
@@ -154,7 +154,7 @@ def main():
 
         src_label, size_mb = copy_result(job_id, label)
 
-        viewer_url = f"http://localhost:5000/static/supersplat/index.html?load=/ply/result_{label}"
+        viewer_url = f"http://localhost:5000/static/supersplat/index.html?load=/ply/result_{label}.ply"
         summary.append((label, final_status, elapsed, size_mb, src_label, viewer_url))
 
         mins = elapsed / 60
