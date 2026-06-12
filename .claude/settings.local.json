@@ -79,7 +79,15 @@
       "Bash(sed -i '1s/# Gaussian Splatting App - Setup \\\\& Troubleshooting/# FonixFlow Splat — Setup \\\\& Troubleshooting/' SETUP.md)",
       "Bash(ls *.md simple_splat/App/*.md simple_splat/*.md)",
       "Bash(wc -l CLAUDE.md simple_splat/App/*.md)",
-      "Bash(python -c \"import json; print\\(sorted\\(json.load\\(open\\('presets/medium.json'\\)\\).keys\\(\\)\\)\\)\")"
+      "Bash(python -c \"import json; print\\(sorted\\(json.load\\(open\\('presets/medium.json'\\)\\).keys\\(\\)\\)\\)\")",
+      "Bash(git config *)",
+      "Bash(git credential-manager *)",
+      "Bash(git credential *)",
+      "Bash(git ls-remote *)",
+      "Bash(git gc *)",
+      "Bash(git count-objects *)",
+      "Bash(git fetch *)",
+      "Bash(git commit -q -m ' *)"
     ],
     "additionalDirectories": [
       "f:\\Codebase\\images_to_play\\.claude"
