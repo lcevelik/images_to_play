@@ -13,7 +13,7 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## In Progress
 
-- [ ] Commit pending work: MCMC trainer fixes + smoke test, tabbed GUI redesign, FonixFlow rebrand, docs refresh
+- (none — pick next item from To Do)
 
 ## To Do
 
@@ -33,6 +33,7 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 - [x] 2026-06-12 — GUI redesign: tabbed layout (Create/Settings/Process/Results), no scroll, auto tab-switching
 - [x] 2026-06-12 — Rebrand Simple Splat → FonixFlow Splat (UI, titles, docs)
 - [x] 2026-06-12 — All .md docs refreshed to match code (presets, trainers, endpoints, modules)
+- [x] 2026-06-12 — All work committed and pushed (commits 8cb840b…8280472)
 - [x] 2026-06 — Camera tracking export UI (FBX/GLTF/JSON/Blender)
 - [x] 2026-06 — Multi-GPU support for COLMAP + Brush, preset cleanup (5 presets), Brush LPIPS crash fix
 - [x] 2026-05 — Phases 1–3: JSON presets, blur filter, auto-resize, quality scaler, Brush streaming, stage timings, MCMC trainer integration
