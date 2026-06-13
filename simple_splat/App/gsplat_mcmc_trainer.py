@@ -115,14 +115,15 @@ def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
             'opacities': opacities, 'sh0': sh0, 'shN': shN}
 
 
-def train_mcmc(parent_dir, total_steps=15000, cap_max=1_000_000,
+def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
                sh_degree=3, use_lpips=False, progress_callback=None, output_ply_path=None):
     """Train Gaussian Splat using gsplat MCMCStrategy.
 
     Args:
         parent_dir: Job directory with sparse/0/ and images/
         total_steps: Training iterations
-        cap_max: Hard Gaussian count cap (MCMC never exceeds this)
+        cap_max: Hard Gaussian count cap (MCMC never exceeds this). None or 'auto'
+                 scales it to scene complexity (~30x sparse points, clamped 0.5M-2M)
         sh_degree: Spherical harmonics degree 0-3
         progress_callback: fn(message, level) for log streaming
         output_ply_path: Where to save the PLY (default: parent_dir/gaussian_splat.ply)
@@ -153,6 +154,17 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=1_000_000,
     if num_images == 0 or num_sparse == 0:
         log("No images or sparse points — cannot train", "ERROR")
         return None
+
+    # Auto-cap: scale the Gaussian ceiling to scene complexity instead of a fixed
+    # guess. Sparse-point count is a better signal than photo count (it folds in
+    # both coverage AND texture). ~30x sparse points, clamped to a sane range so a
+    # tiny scene still gets enough and a huge one doesn't blow up VRAM / PLY size.
+    if cap_max is None or cap_max == 'auto':
+        cap_max = int(min(2_000_000, max(500_000, num_sparse * 30)))
+        log(f"Auto cap_max = {cap_max:,} ({num_sparse:,} sparse pts x30, clamped 0.5M-2M)")
+    else:
+        cap_max = int(cap_max)
+        log(f"cap_max = {cap_max:,} (explicit)")
 
     # Scene scale from camera centers (gsplat Parser convention):
     # max distance of any camera from the average camera position, * 1.1
@@ -381,7 +393,8 @@ if __name__ == "__main__":
     parser.add_argument("--input", "-i", required=True)
     parser.add_argument("--output", "-o")
     parser.add_argument("--steps", type=int, default=15000)
-    parser.add_argument("--cap-max", type=int, default=1_000_000)
+    parser.add_argument("--cap-max", type=int, default=None,
+                        help="Gaussian cap; omit for auto (scales to sparse-point count)")
     args = parser.parse_args()
     result = train_mcmc(args.input, total_steps=args.steps, cap_max=args.cap_max, output_ply_path=args.output)
     print("Success:" if result else "Failed:", result)

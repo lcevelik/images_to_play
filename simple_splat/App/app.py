@@ -881,7 +881,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 result_path = train_mcmc(
                     parent_dir,
                     total_steps=training_steps,
-                    cap_max=config.get('mcmc_cap', 1_000_000),
+                    cap_max=config.get('mcmc_cap'),  # None -> auto (scales to sparse points)
                     sh_degree=3,
                     use_lpips=(detail_level != 'low'),
                     progress_callback=mcmc_log,
