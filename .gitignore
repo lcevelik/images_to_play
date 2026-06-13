@@ -9,8 +9,12 @@ __pycache__/
 node_modules/  
 .next/ 
   
-# Large files  
-mipnerf360.zip  
-target/  
-test_data/  
-Brush/ 
+# Large files
+mipnerf360.zip
+target/
+test_data/
+Brush/
+
+# Packaging build output (large binaries, not for git)
+packaging/build/
+packaging/dist/
