@@ -992,10 +992,10 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     brush_cmd = [
                         brush_path,
                         parent_dir,
-                        # Headless: --with-viewer defaults to true in Brush, which opens a GUI window
-                        # that renders on the same GPU (much slower) and suppresses stdout. Off = fast
-                        # training + real step progress printed to stdout.
-                        "--with-viewer", "false",
+                        # NOTE: Brush v0.3.0's `--with-viewer` is a no-value flag in the compiled
+                        # binary (it rejects `--with-viewer false`). We therefore DON'T pass it —
+                        # the run works (a viewer window may open). True headless syntax for this
+                        # build is unconfirmed; verify with `brush_app.exe --help` before re-adding.
                         "--total-steps", str(training_steps),
                         "--export-path", export_path,
                         "--export-name", "export_{iter}.ply",
