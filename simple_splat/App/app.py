@@ -1674,12 +1674,15 @@ def upload_files():
             add_log("Auto-detected matcher: Exhaustive (image input)", "INFO")
 
     # For videos, interval was already applied during frame extraction
-    # So don't apply it again in COLMAP
+    # So don't apply it again in COLMAP.
+    # For image uploads, never subsample: the user hand-picked these photos and
+    # all of them should be used. The "Frame Interval" control is video-only
+    # (hidden for image uploads), so its value must not drop uploaded images.
     if is_video:
         colmap_interval = 1  # Don't filter again
         add_log(f"Video mode: interval={interval} already applied during extraction", "DEBUG")
     else:
-        colmap_interval = interval  # Apply interval for uploaded images
+        colmap_interval = 1  # Use ALL uploaded images (no subsampling)
 
     # Handle Sharpness & Training options (work with ANY preset)
     sharpness_boost = request.form.get('sharpness_boost', 'false').lower() == 'true'
