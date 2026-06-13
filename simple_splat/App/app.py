@@ -5,6 +5,13 @@ import uuid
 import zipfile
 import shutil
 
+# Ensure this file's directory is always on sys.path so lazy imports like
+# run_glomap work correctly when launched from an embedded Python or a
+# directory other than App/.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
 # Force UTF-8 output so emoji/unicode in log messages don't crash on Windows cp1252 console
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
