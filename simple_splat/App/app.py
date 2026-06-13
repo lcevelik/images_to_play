@@ -983,13 +983,20 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     # this without recompiling Brush. LPIPS is available via the MCMC trainer
                     # (PyTorch/CUDA, no buffer limit). Brush always runs without LPIPS.
 
+                    # Export checkpoints PERIODICALLY, not just once at the end. brush_app.exe
+                    # is a GUI-subsystem binary (no stdout to our pipe) and can outlast the time
+                    # budget, so a single end-of-run export means a timeout yields NOTHING. With
+                    # periodic exports, every interval drops a usable export_<step>.ply on disk —
+                    # so a kill/crash/timeout still leaves the best-so-far splat to salvage.
+                    export_interval = max(2000, training_steps // 8)
+
                     brush_cmd = [
                         brush_path,
                         parent_dir,
                         "--total-steps", str(training_steps),
                         "--export-path", export_path,
                         "--export-name", "gaussian_splat.ply",
-                        "--export-every", str(training_steps),
+                        "--export-every", str(export_interval),
                         "--max-resolution", max_res,
                         "--growth-grad-threshold", grad_threshold,
                         "--growth-select-fraction", growth_fraction,
@@ -1036,10 +1043,40 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     stdout_thread = threading.Thread(target=_read_brush_stdout, daemon=True)
                     stdout_thread.start()
 
+                    # brush_app.exe (GUI-subsystem build) writes nothing to our stdout pipe, so the
+                    # parser above stays at 0. The reliable progress signal is the export_<step>.ply
+                    # checkpoints Brush drops on disk. Watch those. point_cloud.ply (sparse fallback)
+                    # and dense/fused.ply share this folder and are NOT trained splats — exclude them.
+                    _brush_export_re = re.compile(r'(\d+)\.ply$')
+
+                    def _brush_checkpoints():
+                        """Brush .ply checkpoints from THIS run, newest first: [(path, mtime, step)]."""
+                        out = []
+                        for p in Path(export_path).glob('*.ply'):
+                            if p.name in ('point_cloud.ply', 'fused.ply'):
+                                continue
+                            try:
+                                mtime = p.stat().st_mtime
+                            except OSError:
+                                continue
+                            if mtime < training_start - 5:   # predates this run → stale
+                                continue
+                            m = _brush_export_re.search(p.name)
+                            out.append((str(p), mtime, int(m.group(1)) if m else None))
+                        out.sort(key=lambda c: c[1], reverse=True)
+                        return out
+
                     last_info_log_step = [0]
+                    brush_timed_out = False
                     while process.poll() is None:
                         elapsed = time.time() - training_start
-                        current_step = brush_current_step[0]
+
+                        # Prefer a real step from stdout (console builds); otherwise read it from
+                        # the latest export_<step>.ply checkpoint on disk (GUI build). Either gives
+                        # a true measured rate for an honest ETA.
+                        ckpts = _brush_checkpoints()
+                        fs_step = next((s for _p, _m, s in ckpts if s is not None), 0)
+                        current_step = max(brush_current_step[0], fs_step)
 
                         if current_step > 0:
                             # Time-weighted progress across the training band + live ETA
@@ -1056,10 +1093,8 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                                 last_info_log_step[0] = current_step
                                 add_log(f"[Brush] Step {current_step}/{training_steps} ({pct}%) — {int(elapsed)}s elapsed", "INFO")
                         else:
-                            # Brush may be a GUI app that shows progress in its own window
-                            # instead of writing to stdout. Estimate progress from elapsed time
-                            # so the bar still advances. ~0.02 s/step is conservative for an RTX 8000;
-                            # we cap the time-based guess at 90% so completion is never implied.
+                            # No step yet (no checkpoint written, no stdout). Estimate from elapsed
+                            # time so the bar still advances. Cap at 90% so completion is never implied.
                             expected_sec = max(900.0, training_steps * 0.025)
                             time_frac = min(0.90, elapsed / expected_sec)
                             pct = train_pct_start + int((99 - train_pct_start) * time_frac)
@@ -1070,68 +1105,70 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                             processing_status[job_id]['step'] = f'Training Gaussian Splats ({int(elapsed)}s elapsed{eta_str})...'
                             if elapsed > 30 and time.time() - last_progress_time[0] > 60:
                                 last_progress_time[0] = time.time()
-                                add_log(f"[Brush] Training in progress — {int(elapsed)}s elapsed (progress estimated from time; Brush may be rendering in its own window)", "INFO")
+                                add_log(f"[Brush] Training in progress — {int(elapsed)}s elapsed (waiting for first checkpoint; Brush renders in its own window)", "INFO")
 
                         if elapsed > timeout_seconds:
                             process.kill()
-                            add_log("Brush timed out", "ERROR")
+                            brush_timed_out = True
+                            add_log(f"Brush exceeded time budget ({timeout_seconds}s) — stopping and salvaging latest checkpoint", "WARNING")
                             break
                         time.sleep(5)
 
                     stdout_thread.join(timeout=10)
 
                     result_code = process.returncode
-                    add_log(f"Brush completed with return code: {result_code}", "INFO")
+                    add_log(f"Brush exited with return code: {result_code}", "INFO")
 
-                    if result_code == 0:
-                        possible_plys = [
-                            os.path.join(export_path, f"export_{training_steps}.ply"),
-                            os.path.join(export_path, "gaussian_splat.ply"),
-                            os.path.join(export_path, "splat.ply"),
-                        ]
-                        export_plys = list(Path(export_path).glob('export_*.ply'))
-                        if export_plys:
-                            possible_plys.extend([str(p) for p in export_plys])
+                    # Pick the most-progressed real checkpoint Brush wrote. This unifies the
+                    # clean-finish and timeout-salvage paths: a periodic export from step N is a
+                    # complete, viewable splat even if training never reached total-steps. We take
+                    # the highest step (best quality), falling back to newest-by-mtime if exports
+                    # are unnumbered. Tiny/empty files (<1 KB) are skipped as failures.
+                    ckpts = _brush_checkpoints()
+                    numbered = [c for c in ckpts if c[2] is not None]
+                    ordered = sorted(numbered, key=lambda c: c[2], reverse=True) + \
+                              [c for c in ckpts if c[2] is None]
+                    found_ply, found_step = None, None
+                    for path, _mtime, step in ordered:
+                        if os.path.getsize(path) > 1024:
+                            found_ply, found_step = path, step
+                            break
 
-                        found_ply = None
-                        for ply_path in possible_plys:
-                            if os.path.exists(ply_path):
-                                found_ply = ply_path
-                                break
+                    if found_ply:
+                        output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
+                        if os.path.abspath(found_ply) != os.path.abspath(output_ply):
+                            shutil.copy(found_ply, output_ply)
 
-                        # A real Brush splat is well over a few KB. An empty/tiny
-                        # file means Brush exited 0 but produced nothing usable.
-                        if found_ply and os.path.getsize(found_ply) > 1024:
-                            output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
-                            if found_ply != output_ply:
-                                shutil.copy(found_ply, output_ply)
+                        # Prune near-invisible Gaussians — removes ~50% with no visible quality change
+                        try:
+                            from gaussian_splat_utils import prune_gaussian_ply
+                            orig, kept = prune_gaussian_ply(output_ply, opacity_threshold=0.005)
+                            if orig > 0:
+                                reduction = (1 - kept / orig) * 100
+                                ply_size = os.path.getsize(output_ply) / (1024 * 1024)
+                                add_log(f"[Prune] {orig:,} → {kept:,} Gaussians ({reduction:.0f}% removed) → {ply_size:.1f} MB", "INFO")
+                        except Exception as e:
+                            add_log(f"[Prune] skipped: {e}", "WARNING")
 
-                            # Prune near-invisible Gaussians — removes ~50% with no visible quality change
-                            try:
-                                from gaussian_splat_utils import prune_gaussian_ply
-                                orig, kept = prune_gaussian_ply(output_ply, opacity_threshold=0.005)
-                                if orig > 0:
-                                    reduction = (1 - kept / orig) * 100
-                                    ply_size = os.path.getsize(output_ply) / (1024 * 1024)
-                                    add_log(f"[Prune] {orig:,} → {kept:,} Gaussians ({reduction:.0f}% removed) → {ply_size:.1f} MB", "INFO")
-                            except Exception as e:
-                                add_log(f"[Prune] skipped: {e}", "WARNING")
-
-                            ply_generated = True
-                            trainer_used = 'brush'
-                            ply_size = os.path.getsize(output_ply) / (1024 * 1024)
-                            add_log(f"Brush training complete! Output: {output_ply} ({ply_size:.2f} MB)", "INFO")
+                        ply_generated = True
+                        trainer_used = 'brush'
+                        ply_size = os.path.getsize(output_ply) / (1024 * 1024)
+                        if brush_timed_out:
+                            step_note = f" at step {found_step}/{training_steps}" if found_step else ""
+                            add_log(f"Brush hit the time budget — salvaged latest checkpoint{step_note} "
+                                    f"({ply_size:.2f} MB). Usable, but lower quality than a full run.", "WARNING")
                         else:
-                            # Do NOT fall back to a bare *.ply glob here: point_cloud.ply
-                            # and dense/fused.ply live in the same folder and are NOT
-                            # trained splats. Leave ply_generated False so the explicit
-                            # COLMAP sparse fallback below runs and is labelled honestly.
-                            if found_ply:
-                                add_log(f"Brush PLY is empty/too small ({os.path.getsize(found_ply)} bytes) — treating as failure", "WARNING")
-                            else:
-                                add_log(f"Brush completed but produced no splat PLY in {export_path}", "WARNING")
+                            add_log(f"Brush training complete! Output: {output_ply} ({ply_size:.2f} MB)", "INFO")
                     else:
-                        add_log(f"Brush training failed with code {result_code}", "ERROR")
+                        # No usable checkpoint. Leave ply_generated False so the explicit COLMAP
+                        # sparse fallback below runs and is labelled honestly.
+                        if brush_timed_out:
+                            add_log(f"Brush timed out before writing any checkpoint (export interval "
+                                    f"{export_interval} steps not reached). Reduce training steps or raise the time budget.", "ERROR")
+                        elif result_code not in (0, None):
+                            add_log(f"Brush failed with code {result_code} and wrote no usable PLY", "ERROR")
+                        else:
+                            add_log(f"Brush exited but produced no usable splat PLY in {export_path}", "WARNING")
 
                 except Exception as e:
                     add_log(f"Error running Brush: {e}", "ERROR")
