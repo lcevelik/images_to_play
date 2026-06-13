@@ -92,6 +92,28 @@ Pillow
 psutil
 """
 
+# MCMC extras (--with-mcmc): the gsplat/CUDA trainer. NVIDIA-only — torch's cu126
+# wheel carries the CUDA runtime, so target machines need only a recent NVIDIA
+# driver (no CUDA toolkit). gsplat must resolve to a PREBUILT wheel; if pip can
+# only find an sdist for the chosen Python, the target would need a compiler —
+# in that case pin PYTHON_VERSION to a version that has gsplat wheels (3.10/3.11).
+MCMC_REQUIREMENTS = """\
+
+# --- MCMC trainer (CUDA / NVIDIA only) ---
+torch
+torchvision
+gsplat
+pytorch-msssim
+scipy
+plyfile
+pycolmap
+"""
+
+# torch CUDA 12.6 wheels live on PyTorch's own index; gsplat prebuilt wheels on
+# its wheel index. Both are passed to pip as extra/find-links sources.
+TORCH_CU126_INDEX = "https://download.pytorch.org/whl/cu126"
+GSPLAT_WHL_INDEX  = "https://docs.gsplat.studio/whl"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -194,7 +216,42 @@ def step_download_wheels(wheels_dir: Path, python_dir: Path):
     log(f"Wheels saved to {wheels_dir}")
 
 
-def step_copy_app(app_src: Path, app_dst: Path):
+def step_download_mcmc_wheels(wheels_dir: Path, python_dir: Path):
+    """Download torch(cu126) + gsplat(prebuilt) + MCMC deps into App/wheels/.
+
+    These go into the SAME wheels/ folder so the existing first-run offline
+    installer picks them up automatically (requirements.txt is extended).
+    """
+    print("\n[2b/7] Downloading MCMC wheels (torch + gsplat, ~2.5 GB)")
+    wheels_dir.mkdir(parents=True, exist_ok=True)
+
+    pip_exe = python_dir / "Scripts" / "pip.exe"
+    if not pip_exe.exists():
+        pip_exe = python_dir / "Scripts" / "pip3.exe"
+
+    py_tag = "".join(PYTHON_VERSION.split(".")[:2])  # "3.11.9" -> "311"
+    packages = [
+        line.strip()
+        for line in MCMC_REQUIREMENTS.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    log(f"Resolving {len(packages)} MCMC packages for cp{py_tag} / win_amd64 ...")
+    log("  (gsplat must resolve to a PREBUILT wheel — watch for an sdist fallback)")
+    run([
+        pip_exe, "download",
+        "--only-binary", ":all:",          # fail loudly if only an sdist exists
+        "--python-version", py_tag,
+        "--platform", "win_amd64",
+        "--extra-index-url", TORCH_CU126_INDEX,
+        "--find-links", GSPLAT_WHL_INDEX,
+        "-d", str(wheels_dir),
+        *packages,
+    ])
+    log(f"MCMC wheels saved to {wheels_dir}")
+
+
+def step_copy_app(app_src: Path, app_dst: Path, with_mcmc: bool = False):
     """Copy App/ source, excluding generated files."""
     print("\n[3/7] Copying App")
     if app_dst.exists():
@@ -202,9 +259,10 @@ def step_copy_app(app_src: Path, app_dst: Path):
     copy_tree(app_src, app_dst, exclude=APP_EXCLUDES)
     log(f"Copied App/ ({sum(1 for _ in app_dst.rglob('*'))} files)")
 
-    # Write the Lite requirements.txt
-    (app_dst / "requirements.txt").write_text(LITE_REQUIREMENTS)
-    log("Wrote requirements.txt (Lite)")
+    # Write requirements.txt — Lite, plus MCMC extras when building the Full bundle
+    requirements = LITE_REQUIREMENTS + (MCMC_REQUIREMENTS if with_mcmc else "")
+    (app_dst / "requirements.txt").write_text(requirements)
+    log(f"Wrote requirements.txt ({'Full/MCMC' if with_mcmc else 'Lite'})")
 
     # Create empty dirs that the app expects at runtime
     for d in ("processing", "uploads", "job_status"):
@@ -426,6 +484,8 @@ def main():
     parser.add_argument("--no-zip",    action="store_true", help="Skip final zip step")
     parser.add_argument("--no-colmap", action="store_true", help="Skip COLMAP copy (for faster iteration)")
     parser.add_argument("--no-brush",  action="store_true", help="Skip Brush copy")
+    parser.add_argument("--with-mcmc", action="store_true",
+                        help="Bundle torch+gsplat for the gsplat MCMC trainer (~+2.5 GB, NVIDIA-only)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -442,8 +502,10 @@ def main():
 
     step_python_embed(python_dir)
     # Copy App/ first (rmtree + copy), THEN download wheels into App/wheels/
-    step_copy_app(SIMPLE_SPLAT / "App", PACKAGE_DIR / "App")
+    step_copy_app(SIMPLE_SPLAT / "App", PACKAGE_DIR / "App", with_mcmc=args.with_mcmc)
     step_download_wheels(wheels_dir, python_dir)
+    if args.with_mcmc:
+        step_download_mcmc_wheels(wheels_dir, python_dir)
 
     if not args.no_colmap:
         step_copy_colmap(COLMAP_SRC, PACKAGE_DIR / "COLMAP")
