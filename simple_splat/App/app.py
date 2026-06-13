@@ -988,7 +988,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     # budget, so a single end-of-run export means a timeout yields NOTHING. With
                     # periodic exports, every interval drops a usable export_<step>.ply on disk —
                     # so a kill/crash/timeout still leaves the best-so-far splat to salvage.
-                    export_interval = max(2000, training_steps // 8)
+                    export_interval = max(2000, training_steps // 10)
 
                     brush_cmd = [
                         brush_path,
@@ -1068,44 +1068,55 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
                     last_info_log_step = [0]
                     brush_timed_out = False
+                    # Brush (GUI build) writes no stdout AND overwrites a single fixed-name export
+                    # every interval (no step in the filename). So we can't read the step directly.
+                    # Instead we COUNT export events (each new mtime on the export file = one more
+                    # `export_interval` steps done) and calibrate a real step-rate from them. The
+                    # ETA then reflects Brush's actual measured speed on this scene/hardware, which
+                    # is the only honest source — a hardcoded guess is what made the last ETA wrong.
+                    export_events = 0
+                    last_ckpt_mtime = None
+                    calib_steps = 0      # steps confirmed by the latest export event
+                    calib_time = 0.0     # elapsed time at that event
                     while process.poll() is None:
                         elapsed = time.time() - training_start
 
-                        # Prefer a real step from stdout (console builds); otherwise read it from
-                        # the latest export_<step>.ply checkpoint on disk (GUI build). Either gives
-                        # a true measured rate for an honest ETA.
                         ckpts = _brush_checkpoints()
-                        fs_step = next((s for _p, _m, s in ckpts if s is not None), 0)
-                        current_step = max(brush_current_step[0], fs_step)
+                        newest_mtime = ckpts[0][1] if ckpts else None
+                        if newest_mtime is not None and newest_mtime != last_ckpt_mtime:
+                            last_ckpt_mtime = newest_mtime
+                            export_events += 1
+                            calib_steps = export_events * export_interval
+                            calib_time = elapsed
+                            add_log(f"[Brush] Checkpoint #{export_events} written (~{calib_steps}/{training_steps} steps, {int(elapsed)}s elapsed)", "INFO")
+                        # A numbered filename, or a real stdout step, overrides the estimate (exact)
+                        fs_step_named = next((s for _p, _m, s in ckpts if s is not None), 0)
+                        exact_step = max(brush_current_step[0], fs_step_named)
+                        if exact_step > 0:
+                            calib_steps, calib_time = exact_step, elapsed
 
-                        if current_step > 0:
-                            # Time-weighted progress across the training band + live ETA
-                            # from the measured step rate (the accurate part of the bar).
-                            pct = train_pct_start + int((99 - train_pct_start) * current_step / training_steps)
-                            pct = min(99, pct)
-                            eta = int((training_steps - current_step) / (current_step / elapsed)) if elapsed > 0 else None
+                        if calib_steps > 0 and calib_time > 0:
+                            # Measured rate from real progress → smooth, self-correcting ETA.
+                            rate = calib_steps / calib_time          # steps per second
+                            est_step = min(int(rate * elapsed), training_steps - 1)
+                            pct = min(99, train_pct_start + int((99 - train_pct_start) * est_step / training_steps))
+                            eta = int((training_steps - est_step) / rate) if rate > 0 else None
                             processing_status[job_id]['progress'] = pct
                             processing_status[job_id]['eta_seconds'] = eta
                             eta_str = f", ~{eta // 60}m {eta % 60}s left" if eta else ""
-                            processing_status[job_id]['step'] = f'Training Gaussian Splats ({current_step}/{training_steps} steps{eta_str})'
-                            # Log to INFO every 5000 steps
-                            if current_step - last_info_log_step[0] >= 5000:
-                                last_info_log_step[0] = current_step
-                                add_log(f"[Brush] Step {current_step}/{training_steps} ({pct}%) — {int(elapsed)}s elapsed", "INFO")
+                            processing_status[job_id]['step'] = f'Training Gaussian Splats (~{est_step}/{training_steps} steps{eta_str})'
+                            if est_step - last_info_log_step[0] >= 5000:
+                                last_info_log_step[0] = est_step
+                                add_log(f"[Brush] ~Step {est_step}/{training_steps} ({pct}%) — {int(elapsed)}s elapsed", "INFO")
                         else:
-                            # No step yet (no checkpoint written, no stdout). Estimate from elapsed
-                            # time so the bar still advances. Cap at 90% so completion is never implied.
-                            expected_sec = max(900.0, training_steps * 0.025)
-                            time_frac = min(0.90, elapsed / expected_sec)
-                            pct = train_pct_start + int((99 - train_pct_start) * time_frac)
-                            eta_guess = int(expected_sec - elapsed) if elapsed < expected_sec else None
-                            processing_status[job_id]['progress'] = pct
-                            processing_status[job_id]['eta_seconds'] = eta_guess
-                            eta_str = f", ~{eta_guess // 60}m {eta_guess % 60}s left" if eta_guess else ""
-                            processing_status[job_id]['step'] = f'Training Gaussian Splats ({int(elapsed)}s elapsed{eta_str})...'
+                            # Before the first export we have no rate. Hold at the band start and show
+                            # elapsed only (no fabricated ETA — that's what misled last time).
+                            processing_status[job_id]['progress'] = train_pct_start
+                            processing_status[job_id]['eta_seconds'] = None
+                            processing_status[job_id]['step'] = f'Training Gaussian Splats (warming up, {int(elapsed)}s elapsed)...'
                             if elapsed > 30 and time.time() - last_progress_time[0] > 60:
                                 last_progress_time[0] = time.time()
-                                add_log(f"[Brush] Training in progress — {int(elapsed)}s elapsed (waiting for first checkpoint; Brush renders in its own window)", "INFO")
+                                add_log(f"[Brush] Training — {int(elapsed)}s elapsed, awaiting first checkpoint (every {export_interval} steps); Brush renders in its own window", "INFO")
 
                         if elapsed > timeout_seconds:
                             process.kill()
