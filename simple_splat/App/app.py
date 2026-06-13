@@ -464,9 +464,42 @@ def extract_frames_from_video(video_path, output_folder, frame_interval=10, max_
         return 0
 
 def extract_zip(zip_path, extract_to):
-    """Extract zip file to directory"""
+    """Extract zip file to directory, flattening any nested folders.
+
+    A ZIP made from a folder (the common case) contains a subfolder like
+    photos/IMG_001.jpg. Downstream counting uses a non-recursive os.listdir
+    on extract_to, so nested images would be invisible and the pipeline would
+    see zero images. Flatten all image files to the top level and skip macOS
+    junk (__MACOSX, .DS_Store)."""
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_to)
+
+    # Move any image files found in subfolders up to extract_to (flatten).
+    for root, _dirs, filenames in os.walk(extract_to):
+        if os.path.abspath(root) == os.path.abspath(extract_to):
+            continue  # already at top level
+        if '__MACOSX' in root:
+            continue  # macOS resource-fork junk
+        for fname in filenames:
+            if not fname.lower().endswith(IMAGE_EXTENSIONS):
+                continue
+            src = os.path.join(root, fname)
+            dst = os.path.join(extract_to, fname)
+            # Avoid collisions between identically-named files in different subfolders
+            if os.path.exists(dst):
+                base, ext = os.path.splitext(fname)
+                i = 1
+                while os.path.exists(os.path.join(extract_to, f"{base}_{i}{ext}")):
+                    i += 1
+                dst = os.path.join(extract_to, f"{base}_{i}{ext}")
+            shutil.move(src, dst)
+
+    # Remove now-empty subdirectories (including __MACOSX)
+    for entry in os.listdir(extract_to):
+        sub = os.path.join(extract_to, entry)
+        if os.path.isdir(sub):
+            shutil.rmtree(sub, ignore_errors=True)
+
     return extract_to
 
 def process_images_async(job_id, image_path, preset='medium', matcher_type='exhaustive_matcher', interval=1, advanced_settings=None, quality_scale=1.0):
@@ -1697,11 +1730,16 @@ def upload_files():
     quality_mode_enabled = mvs_mode in ['quality', 'ultra_sharpness']
     trainer_choice = request.form.get('trainer', 'brush').lower()
 
+    # advanced_settings OVERRIDES the preset; the merge skips None values so the
+    # preset's own defaults are preserved. Only force a value when the user
+    # actually chose one. max_image_size and quality_mode have no UI control in
+    # the current GUI, so they must stay None — otherwise every preset above
+    # 'medium' gets silently downgraded to 3200px / quality_mode off.
     advanced_settings = {
         'training_steps': None,
         'enable_dense': request.form.get('enable_dense', 'false').lower() == 'true',
-        'max_image_size': int(request.form.get('max_image_size', 3200)),
-        'quality_mode': quality_mode_enabled,
+        'max_image_size': int(request.form['max_image_size']) if request.form.get('max_image_size') else None,
+        'quality_mode': True if quality_mode_enabled else None,
         'mvs_quality_mode': mvs_mode,
         'trainer': trainer_choice,
     }
