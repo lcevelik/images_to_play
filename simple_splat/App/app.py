@@ -1056,13 +1056,21 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                                 last_info_log_step[0] = current_step
                                 add_log(f"[Brush] Step {current_step}/{training_steps} ({pct}%) — {int(elapsed)}s elapsed", "INFO")
                         else:
-                            # No step parsed yet — hold at the training band start, ETA unknown
-                            processing_status[job_id]['progress'] = train_pct_start
-                            processing_status[job_id]['eta_seconds'] = None
-                            processing_status[job_id]['step'] = f'Training Gaussian Splats (starting... {int(elapsed)}s elapsed)...'
+                            # Brush may be a GUI app that shows progress in its own window
+                            # instead of writing to stdout. Estimate progress from elapsed time
+                            # so the bar still advances. ~0.02 s/step is conservative for an RTX 8000;
+                            # we cap the time-based guess at 90% so completion is never implied.
+                            expected_sec = max(900.0, training_steps * 0.025)
+                            time_frac = min(0.90, elapsed / expected_sec)
+                            pct = train_pct_start + int((99 - train_pct_start) * time_frac)
+                            eta_guess = int(expected_sec - elapsed) if elapsed < expected_sec else None
+                            processing_status[job_id]['progress'] = pct
+                            processing_status[job_id]['eta_seconds'] = eta_guess
+                            eta_str = f", ~{eta_guess // 60}m {eta_guess % 60}s left" if eta_guess else ""
+                            processing_status[job_id]['step'] = f'Training Gaussian Splats ({int(elapsed)}s elapsed{eta_str})...'
                             if elapsed > 30 and time.time() - last_progress_time[0] > 60:
                                 last_progress_time[0] = time.time()
-                                add_log(f"[Brush] Training in progress — {int(elapsed)}s elapsed, waiting for step output...", "INFO")
+                                add_log(f"[Brush] Training in progress — {int(elapsed)}s elapsed (progress estimated from time; Brush may be rendering in its own window)", "INFO")
 
                         if elapsed > timeout_seconds:
                             process.kill()
