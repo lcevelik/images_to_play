@@ -564,12 +564,19 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         max_image_size = config['max_image_size']
         quality_mode = config['quality_mode']
 
+        # Progress-bar budget. Training dominates wall-time and reports steps, so
+        # it gets the bulk of the bar (train_pct_start..99). COLMAP is comparatively
+        # quick and gets the small head room below train_pct_start. Dense MVS, when
+        # enabled, pushes the training band start higher.
+        train_pct_start = 35 if enable_dense else 18
+
         # Initialize processing status first (so job-specific logs can be captured)
         processing_status[job_id] = {
             'status': 'processing',
             'step': 'Initializing...',
             'stage': 'initialization',
             'progress': 0,
+            'eta_seconds': None,  # estimated seconds remaining (set live during training)
             'error': None,
             'logs': deque(maxlen=200),
             'preset': preset,
@@ -603,7 +610,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             add_log(f"[QUALITY] QUALITY MODE ENABLED - Maximum quality settings (slower processing)", "INFO")
         
         # Count images
-        image_files = [f for f in os.listdir(image_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        image_files = [f for f in os.listdir(image_path) if f.lower().endswith(IMAGE_EXTENSIONS)]
         add_log(f"Found {len(image_files)} images to process", "INFO")
         
         # Import and run the glomap processing
@@ -612,13 +619,19 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         # Set up progress callback to route COLMAP logs to our log system
         def colmap_progress_callback(message, level):
             add_log(message, level)
-            # Detect stage transitions from COLMAP log messages
+            # Detect stage transitions from COLMAP log messages and step the
+            # progress bar through a small COLMAP head-room band (training owns
+            # the rest). Floors only move forward, never backward.
+            def _bump(stage, floor):
+                transition_stage(processing_status, job_id, stage)
+                if processing_status[job_id].get('progress', 0) < floor:
+                    processing_status[job_id]['progress'] = floor
             if "STEP 2" in message or "Feature Matching" in message or "matching" in message.lower():
-                transition_stage(processing_status, job_id, 'feature_matching')
+                _bump('feature_matching', 8)
             elif "STEP 3" in message or "Mapper" in message or "Reconstructing" in message or "triangulating" in message.lower():
-                transition_stage(processing_status, job_id, 'mapping')
+                _bump('mapping', 12)
             elif "STEP 4" in message or "PatchMatch" in message or "MVS" in message or "dense" in message.lower():
-                transition_stage(processing_status, job_id, 'dense_mvs')
+                _bump('dense_mvs', 25)
             # Update status step with latest progress message
             if "Step" in message or "Processing" in message or "Matching" in message or "Registered" in message:
                 processing_status[job_id]['step'] = message.replace("=", "").strip()
@@ -677,7 +690,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
         processing_status[job_id]['step'] = 'Running COLMAP feature extraction...'
         transition_stage(processing_status, job_id, 'feature_extraction')
-        processing_status[job_id]['progress'] = 20
+        processing_status[job_id]['progress'] = 4
 
         add_log("=" * 50, "INFO")
         add_log("STEP 1: Running COLMAP/GLOMAP Pipeline", "INFO")
@@ -717,7 +730,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         add_log("COLMAP processing complete!", "INFO")
         processing_status[job_id]['step'] = 'COLMAP processing complete. Preparing for Gaussian Splat training...'
         transition_stage(processing_status, job_id, 'training')
-        processing_status[job_id]['progress'] = 50
+        processing_status[job_id]['progress'] = 15
         
         # Check if sparse reconstruction exists
         parent_dir = os.path.dirname(image_path)
@@ -738,7 +751,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             add_log(f"COLMAP registered {registered_count} images with {points_count} 3D points", "INFO")
             
             # Warn if too few images were registered
-            original_count = len([f for f in os.listdir(image_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+            original_count = len([f for f in os.listdir(image_path) if f.lower().endswith(IMAGE_EXTENSIONS)])
             if registered_count < original_count * 0.5:
                 add_log(f"WARNING: Only {registered_count}/{original_count} images were registered!", "WARNING")
                 add_log("This means most images couldn't be matched. Try taking photos with more overlap.", "WARNING")
@@ -837,10 +850,11 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         add_log(f"STEP 3: Training Gaussian Splats ({trainer_choice.upper()})", "INFO")
         processing_status[job_id]['step'] = f'Training Gaussian Splats ({trainer_choice.upper()})...'
         add_log("=" * 50, "INFO")
-        processing_status[job_id]['progress'] = 60
+        processing_status[job_id]['progress'] = train_pct_start
 
         output_ply = None
         ply_generated = False
+        trainer_used = None  # which trainer actually produced the output
 
         # --- MCMC branch ---
         if trainer_choice == 'mcmc' and not ply_generated:
@@ -848,15 +862,21 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             try:
                 from gsplat_mcmc_trainer import train_mcmc
                 mcmc_output = os.path.join(parent_dir, 'gaussian_splat.ply')
+                mcmc_train_start = time.time()
 
                 def mcmc_log(msg, level="INFO"):
                     add_log(f"[MCMC] {msg}", level)
                     step_match = re.search(r'Step (\d+)/(\d+)', msg)
                     if step_match:
                         s, total = int(step_match.group(1)), int(step_match.group(2))
-                        pct = 60 + int(s / total * 35)
-                        processing_status[job_id]['progress'] = pct
-                        processing_status[job_id]['step'] = f'MCMC Training ({s}/{total} steps)...'
+                        # Time-weighted progress across the training band + live ETA
+                        # from the measured step rate (the accurate part of the bar).
+                        processing_status[job_id]['progress'] = train_pct_start + int((99 - train_pct_start) * s / total)
+                        el = time.time() - mcmc_train_start
+                        eta = int((total - s) / (s / el)) if s > 0 and el > 0 else None
+                        processing_status[job_id]['eta_seconds'] = eta
+                        eta_str = f", ~{eta // 60}m {eta % 60}s left" if eta else ""
+                        processing_status[job_id]['step'] = f'MCMC Training ({s}/{total} steps{eta_str})'
 
                 result_path = train_mcmc(
                     parent_dir,
@@ -867,13 +887,14 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     progress_callback=mcmc_log,
                     output_ply_path=mcmc_output,
                 )
-                if result_path and os.path.exists(result_path):
+                if result_path and os.path.exists(result_path) and os.path.getsize(result_path) > 1024:
                     output_ply = result_path
                     ply_generated = True
+                    trainer_used = 'mcmc'
                     ply_size = os.path.getsize(output_ply) / (1024 * 1024)
                     add_log(f"MCMC training complete: {ply_size:.1f} MB", "INFO")
                 else:
-                    add_log("MCMC training returned no output — falling back to Brush", "WARNING")
+                    add_log("MCMC training returned no usable output — falling back to Brush", "WARNING")
             except Exception as e:
                 add_log(f"MCMC trainer failed ({e}) — falling back to Brush", "WARNING")
 
@@ -915,7 +936,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
                     def count_images(folder):
                         if os.path.exists(folder):
-                            return len([f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                            return len([f for f in os.listdir(folder) if f.lower().endswith(IMAGE_EXTENSIONS)])
                         return 0
 
                     images_count = count_images(images_folder)
@@ -939,7 +960,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
                     if os.path.exists(images_folder):
                         image_files = [f for f in os.listdir(images_folder)
-                                      if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                                      if f.lower().endswith(IMAGE_EXTENSIONS)]
                         add_log(f"Found {len(image_files)} images for Brush training", "INFO")
                     else:
                         add_log(f"Warning: images folder not found at {images_folder}", "WARNING")
@@ -1021,19 +1042,24 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                         current_step = brush_current_step[0]
 
                         if current_step > 0:
-                            pct = min(99, int(current_step / training_steps * 100))
-                            processing_status[job_id]['step'] = f'Training Gaussian Splats ({current_step}/{training_steps} steps, {int(elapsed)}s elapsed)...'
+                            # Time-weighted progress across the training band + live ETA
+                            # from the measured step rate (the accurate part of the bar).
+                            pct = train_pct_start + int((99 - train_pct_start) * current_step / training_steps)
+                            pct = min(99, pct)
+                            eta = int((training_steps - current_step) / (current_step / elapsed)) if elapsed > 0 else None
                             processing_status[job_id]['progress'] = pct
+                            processing_status[job_id]['eta_seconds'] = eta
+                            eta_str = f", ~{eta // 60}m {eta % 60}s left" if eta else ""
+                            processing_status[job_id]['step'] = f'Training Gaussian Splats ({current_step}/{training_steps} steps{eta_str})'
                             # Log to INFO every 5000 steps
                             if current_step - last_info_log_step[0] >= 5000:
                                 last_info_log_step[0] = current_step
                                 add_log(f"[Brush] Step {current_step}/{training_steps} ({pct}%) — {int(elapsed)}s elapsed", "INFO")
                         else:
-                            # No step parsed yet — time-based estimate
-                            est_total_time = max(training_steps * 0.5, 60)
-                            pct = min(5, int(elapsed / est_total_time * 100))
+                            # No step parsed yet — hold at the training band start, ETA unknown
+                            processing_status[job_id]['progress'] = train_pct_start
+                            processing_status[job_id]['eta_seconds'] = None
                             processing_status[job_id]['step'] = f'Training Gaussian Splats (starting... {int(elapsed)}s elapsed)...'
-                            processing_status[job_id]['progress'] = pct
                             if elapsed > 30 and time.time() - last_progress_time[0] > 60:
                                 last_progress_time[0] = time.time()
                                 add_log(f"[Brush] Training in progress — {int(elapsed)}s elapsed, waiting for step output...", "INFO")
@@ -1065,7 +1091,9 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                                 found_ply = ply_path
                                 break
 
-                        if found_ply:
+                        # A real Brush splat is well over a few KB. An empty/tiny
+                        # file means Brush exited 0 but produced nothing usable.
+                        if found_ply and os.path.getsize(found_ply) > 1024:
                             output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
                             if found_ply != output_ply:
                                 shutil.copy(found_ply, output_ply)
@@ -1082,15 +1110,18 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                                 add_log(f"[Prune] skipped: {e}", "WARNING")
 
                             ply_generated = True
+                            trainer_used = 'brush'
                             ply_size = os.path.getsize(output_ply) / (1024 * 1024)
                             add_log(f"Brush training complete! Output: {output_ply} ({ply_size:.2f} MB)", "INFO")
                         else:
-                            add_log(f"Brush completed but no PLY found in {export_path}", "WARNING")
-                            all_plys = list(Path(export_path).glob('*.ply'))
-                            if all_plys:
-                                output_ply = str(all_plys[0])
-                                ply_generated = True
-                                add_log(f"Found PLY file: {output_ply}", "INFO")
+                            # Do NOT fall back to a bare *.ply glob here: point_cloud.ply
+                            # and dense/fused.ply live in the same folder and are NOT
+                            # trained splats. Leave ply_generated False so the explicit
+                            # COLMAP sparse fallback below runs and is labelled honestly.
+                            if found_ply:
+                                add_log(f"Brush PLY is empty/too small ({os.path.getsize(found_ply)} bytes) — treating as failure", "WARNING")
+                            else:
+                                add_log(f"Brush completed but produced no splat PLY in {export_path}", "WARNING")
                     else:
                         add_log(f"Brush training failed with code {result_code}", "ERROR")
 
@@ -1107,25 +1138,37 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 output_ply = os.path.join(parent_dir, 'point_cloud.ply')
                 ply_generated = generate_ply_from_colmap(sparse_path, output_ply)
                 if ply_generated:
+                    trainer_used = 'sparse_fallback'
                     print(f"Generated basic point cloud: {output_ply}")
             except Exception as e:
                 print(f"Error generating point cloud: {e}")
                 ply_generated = False
-        
+
+        # Surface when the trainer that actually ran differs from what was asked
+        # (e.g. MCMC failed and we fell back to Brush, or both failed to a sparse
+        # point cloud) so the user isn't told a sparse cloud is a trained splat.
+        if ply_generated and trainer_used and trainer_used != trainer_choice:
+            if trainer_used == 'sparse_fallback':
+                add_log(f"NOTE: training failed — output is a SPARSE point cloud, not a trained {trainer_choice.upper()} splat", "WARNING")
+            else:
+                add_log(f"NOTE: requested {trainer_choice.upper()} but output was produced by {trainer_used.upper()} (fallback)", "WARNING")
+
         add_log("=" * 50, "INFO")
         add_log("PROCESSING COMPLETE!", "INFO")
         add_log("=" * 50, "INFO")
         add_log(f"PLY generated: {ply_generated}", "INFO")
         if output_ply:
             add_log(f"Output file: {output_ply}", "INFO")
-        
+
         processing_status[job_id]['step'] = 'Processing complete!'
         processing_status[job_id]['progress'] = 100
+        processing_status[job_id]['eta_seconds'] = 0
         processing_status[job_id]['status'] = 'completed'
         processing_status[job_id]['output_path'] = parent_dir
         processing_status[job_id]['sparse_path'] = sparse_path
         processing_status[job_id]['ply_path'] = output_ply if ply_generated else None
         processing_status[job_id]['ply_available'] = ply_generated
+        processing_status[job_id]['trainer_used'] = trainer_used
         _save_job_status(job_id)
         
     except Exception as e:
@@ -1195,7 +1238,7 @@ def process_mlsharp_async(job_id, image_path, render_views=False, device='auto')
         add_log(f"ML-Sharp version: {mlsharp_version}", "INFO")
 
         # Find input image
-        image_files = [f for f in os.listdir(image_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        image_files = [f for f in os.listdir(image_path) if f.lower().endswith(IMAGE_EXTENSIONS)]
         if not image_files:
             raise Exception("No valid image file found in upload")
         if len(image_files) > 1:
@@ -1624,9 +1667,9 @@ def upload_files():
     
     # Handle uploaded files - check all files, not just the first one
     # Categorize files by type to prevent ignoring files when first file is video/ZIP
-    zip_files = [f for f in files if f.filename.endswith('.zip')]
+    zip_files = [f for f in files if f.filename.lower().endswith('.zip')]
     video_files = [f for f in files if is_video_file(f.filename)]
-    image_files = [f for f in files if f and allowed_file(f.filename) and not f.filename.endswith('.zip') and not is_video_file(f.filename)]
+    image_files = [f for f in files if f and allowed_file(f.filename) and not f.filename.lower().endswith('.zip') and not is_video_file(f.filename)]
 
     # ML-Sharp specific validation
     if method == 'mlsharp':
@@ -1682,11 +1725,24 @@ def upload_files():
         is_video = True
         
     elif len(image_files) > 0:
-        # Save all individual image files
+        # Save all individual image files. secure_filename can collapse different
+        # source names to the same string (non-ASCII names, "IMG (1).jpg", etc.),
+        # so de-duplicate to avoid silently overwriting photos — same logic as
+        # extract_zip's flattening.
         saved_count = 0
-        for file in image_files:
+        for idx, file in enumerate(image_files):
             filename = secure_filename(file.filename)
-            file.save(os.path.join(images_folder, filename))
+            if not filename:  # secure_filename stripped everything (e.g. all non-ASCII)
+                ext = os.path.splitext(file.filename)[1].lower() or '.jpg'
+                filename = f"image_{idx:04d}{ext}"
+            dst = os.path.join(images_folder, filename)
+            if os.path.exists(dst):
+                base, ext = os.path.splitext(filename)
+                i = 1
+                while os.path.exists(os.path.join(images_folder, f"{base}_{i}{ext}")):
+                    i += 1
+                dst = os.path.join(images_folder, f"{base}_{i}{ext}")
+            file.save(dst)
             saved_count += 1
         add_log(f"Uploaded {saved_count} image files", "INFO")
     else:
@@ -2055,10 +2111,14 @@ if __name__ == '__main__':
             """Direct call to process_images_async — no self-HTTP roundtrip."""
             quality_scale_map = {'draft': 0.3, 'standard': 1.0, 'cinematic': 2.0}
             quality_scale = quality_scale_map.get(settings.get('quality_scale', 'standard'), 1.0)
+            # Use None as the "unset" sentinel so the preset's own defaults win
+            # (config.update skips None). Defaulting to True/3200 here would
+            # silently force dense MVS on and downgrade high/quality/expert to
+            # 3200px for every batch job — the same bug as the main upload path.
             advanced_settings = {
                 'training_steps': settings.get('training_steps'),
-                'enable_dense': settings.get('enable_dense', True),
-                'max_image_size': settings.get('max_image_size', 3200),
+                'enable_dense': settings.get('enable_dense'),
+                'max_image_size': settings.get('max_image_size'),
             }
             if advanced_settings['training_steps'] is not None:
                 advanced_settings['training_steps'] = int(advanced_settings['training_steps'])

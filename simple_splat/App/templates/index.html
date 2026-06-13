@@ -1048,7 +1048,10 @@
                     <div class="progress-section" id="progressSection" aria-live="polite">
                         <div class="activity-row">
                             <span id="currentActivity">Initializing...</span>
-                            <span id="elapsedTime">00:00</span>
+                            <span>
+                                <span id="etaRemaining" style="opacity:.65; margin-right:12px;"></span>
+                                <span id="elapsedTime">00:00</span>
+                            </span>
                         </div>
 
                         <div class="progress-cols">
@@ -1545,6 +1548,7 @@
                     document.getElementById('elapsedTime').textContent =
                         `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
                 }
+                renderEta();  // smooth countdown of the remaining-time estimate
             }, 1000);
         }
 
@@ -1553,10 +1557,36 @@
                 clearInterval(elapsedTimer);
                 elapsedTimer = null;
             }
+            _etaSeconds = null;
+            const etaEl = document.getElementById('etaRemaining');
+            if (etaEl) etaEl.textContent = '';
         }
 
         let _lastProgress = -1;
         let _pollInterval = 1500;  // Start at 1.5s, back off to 10s when idle
+
+        // ETA tracking: the backend sends eta_seconds at each poll; between polls
+        // we count it down locally (in the 1s elapsed timer) so it ticks smoothly.
+        let _etaSeconds = null;       // latest ETA from backend (seconds), or null
+        let _etaUpdatedAt = 0;        // Date.now() when _etaSeconds was set
+
+        function formatEta(secs) {
+            if (secs == null || secs < 0) return '';
+            if (secs < 60) return `~${secs}s left`;
+            const m = Math.floor(secs / 60), s = secs % 60;
+            if (m < 60) return `~${m}m ${s}s left`;
+            const h = Math.floor(m / 60), mm = m % 60;
+            return `~${h}h ${mm}m left`;
+        }
+
+        function renderEta() {
+            const el = document.getElementById('etaRemaining');
+            if (!el) return;
+            if (_etaSeconds == null) { el.textContent = ''; return; }
+            // Subtract time elapsed since the last backend update for a smooth countdown
+            const drift = Math.floor((Date.now() - _etaUpdatedAt) / 1000);
+            el.textContent = formatEta(Math.max(0, _etaSeconds - drift));
+        }
 
         async function pollStatus() {
             if (!currentJobId) return;
@@ -1579,6 +1609,8 @@
 
                 if (data.status === 'completed') {
                     progressFill.style.width = '100%';
+                    _etaSeconds = null;
+                    document.getElementById('etaRemaining').textContent = '';
                     document.getElementById('currentActivity').textContent = 'Complete';
                     for (let i = 1; i <= 5; i++) updatePipelineStage(i, 'complete');
                     stopElapsedTimer();
@@ -1605,6 +1637,15 @@
                     const step = data.step || 'Processing...';
                     progressFill.style.width = (data.progress || 0) + '%';
                     document.getElementById('currentActivity').textContent = step;
+
+                    // Capture the backend ETA; renderEta() counts it down between polls
+                    if (typeof data.eta_seconds === 'number') {
+                        _etaSeconds = data.eta_seconds;
+                        _etaUpdatedAt = Date.now();
+                    } else {
+                        _etaSeconds = null;
+                    }
+                    renderEta();
 
                     // Use stage field from backend for more accurate tracking
                     if (data.stage) {

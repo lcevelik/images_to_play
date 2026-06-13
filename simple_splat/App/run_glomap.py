@@ -440,13 +440,31 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
         # ~10-100x faster than incremental mapper for large datasets
         glomap_output = os.path.join(distorted_folder, 'sparse')
         os.makedirs(glomap_output, exist_ok=True)
+        # Map the preset's reconstruction params onto GlobalMapper.* flags (verified
+        # against `colmap global_mapper --help`, COLMAP 4.1.0). Without these, every
+        # preset produced an identical global reconstruction — only feature
+        # extraction/matching differed. Lower tri_min_angle + higher reproj error =
+        # more (denser) 3D points, which is exactly the low->expert gradient.
+        gm_tri_angle = settings.get('tri_angle', 1.0)
+        gm_complete_err = settings.get('tri_complete_error', settings.get('reproj_error', 15.0))
+        gm_merge_err = settings.get('tri_merge_error', settings.get('reproj_error', 15.0))
         mapper_cmd = (
             f'{colmap_cmd} global_mapper '
             f'--database_path "{database_path}" '
             f'--image_path "{image_path}" '
             f'--output_path "{glomap_output}" '
-            f'--GlobalMapper.track_min_num_views_per_track 2'
+            f'--GlobalMapper.track_min_num_views_per_track 2 '
+            f'--GlobalMapper.tri_min_angle {gm_tri_angle} '
+            f'--GlobalMapper.min_tri_angle_deg {gm_tri_angle} '
+            f'--GlobalMapper.tri_complete_max_reproj_error {gm_complete_err} '
+            f'--GlobalMapper.tri_merge_max_reproj_error {gm_merge_err}'
         )
+        # Expert preset: enable principal-point refinement (off by default in
+        # GlobalMapper; focal-length and extra-params refinement are already on).
+        if settings.get('expert', False) or settings.get('refine_principal', False):
+            mapper_cmd += ' --GlobalMapper.ba_refine_principal_point 1'
+            log_progress("[EXPERT] GlobalMapper principal-point refinement: ENABLED", "INFO")
+        log_progress(f"[MAP] GlobalMapper tri_min_angle={gm_tri_angle}, reproj_error={gm_complete_err}px (preset-tuned)", "INFO")
         print("Using COLMAP global_mapper (faster global SfM)")
     else:
         # Use COLMAP mapper with settings based on detail level
@@ -1117,11 +1135,26 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                             log_file.write(f"Moved {file_name} to {sparse_zero_folder}\n")
                             print(f"Moved {file_name} to {sparse_zero_folder}")
 
+        # Validate that a usable sparse reconstruction actually exists before
+        # declaring success. Without this, a failed/empty SfM (too few or blurry
+        # images, insufficient overlap) silently logs "Complete!" and the trainer
+        # then runs on nothing.
+        required_bins = ['cameras.bin', 'images.bin', 'points3D.bin']
+        missing_bins = [b for b in required_bins
+                        if not os.path.exists(os.path.join(sparse_zero_folder, b))]
+        if missing_bins:
+            msg = (f"Sparse reconstruction incomplete — missing {missing_bins} in "
+                   f"{sparse_zero_folder}. COLMAP/GLOMAP failed to register the images "
+                   "(too few/blurry images or insufficient overlap between shots).")
+            log_progress(f"  [ERROR] {msg}", "ERROR")
+            log_file.write(msg + "\n")
+            raise RuntimeError(msg)
+
         total_end_time = time.time()
         total_elapsed_time = total_end_time - total_start_time
         log_file.write(f"COLMAP run finished at: {datetime.datetime.now()}\n")
         log_file.write(f"Total time taken: {total_elapsed_time:.2f} seconds\n")
-        
+
         # Final summary
         log_progress("=" * 50, "INFO")
         log_progress(f"[DONE] COLMAP/GLOMAP Pipeline Complete!", "INFO")
