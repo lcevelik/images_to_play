@@ -983,19 +983,22 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     # this without recompiling Brush. LPIPS is available via the MCMC trainer
                     # (PyTorch/CUDA, no buffer limit). Brush always runs without LPIPS.
 
-                    # Export checkpoints PERIODICALLY, not just once at the end. brush_app.exe
-                    # is a GUI-subsystem binary (no stdout to our pipe) and can outlast the time
-                    # budget, so a single end-of-run export means a timeout yields NOTHING. With
-                    # periodic exports, every interval drops a usable export_<step>.ply on disk —
-                    # so a kill/crash/timeout still leaves the best-so-far splat to salvage.
+                    # Export checkpoints PERIODICALLY so a timeout/crash still leaves a usable splat.
+                    # export_name uses Brush's {iter} token so each export is a NUMBERED file
+                    # (export_5000.ply, export_10000.ply, ...) — that lets us read the real step
+                    # for accurate progress. A fixed name (no {iter}) overwrites one unnumbered file.
                     export_interval = max(2000, training_steps // 10)
 
                     brush_cmd = [
                         brush_path,
                         parent_dir,
+                        # Headless: --with-viewer defaults to true in Brush, which opens a GUI window
+                        # that renders on the same GPU (much slower) and suppresses stdout. Off = fast
+                        # training + real step progress printed to stdout.
+                        "--with-viewer", "false",
                         "--total-steps", str(training_steps),
                         "--export-path", export_path,
-                        "--export-name", "gaussian_splat.ply",
+                        "--export-name", "export_{iter}.ply",
                         "--export-every", str(export_interval),
                         "--max-resolution", max_res,
                         "--growth-grad-threshold", grad_threshold,
