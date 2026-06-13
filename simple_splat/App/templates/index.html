@@ -1442,6 +1442,12 @@
             processingStartTime = Date.now();
             startElapsedTimer();
 
+            // Ask for desktop-notification permission inside this click gesture so the
+            // browser actually shows the prompt; we fire a notification when the job ends.
+            if ('Notification' in window && Notification.permission === 'default') {
+                Notification.requestPermission();
+            }
+
             const formData = new FormData();
             selectedFiles.forEach(file => formData.append('files', file));
 
@@ -1588,6 +1594,32 @@
             el.textContent = formatEta(Math.max(0, _etaSeconds - drift));
         }
 
+        // Fire a desktop notification + a short beep when a job ends. Guarded so it
+        // only fires once per job, and degrades silently if permission was denied.
+        let _notifiedJob = null;
+        function notifyJobDone(success, message) {
+            if (_notifiedJob === currentJobId) return;
+            _notifiedJob = currentJobId;
+            const title = success ? 'FonixFlow Splat — Done ✓' : 'FonixFlow Splat — Failed ✗';
+            try {
+                if ('Notification' in window && Notification.permission === 'granted') {
+                    const n = new Notification(title, { body: message || '', tag: 'fonixflow-job' });
+                    n.onclick = () => { window.focus(); n.close(); };
+                }
+            } catch (e) { /* notifications unsupported — ignore */ }
+            // Audible cue (works even when the tab is backgrounded / permission denied)
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator(), gain = ctx.createGain();
+                osc.connect(gain); gain.connect(ctx.destination);
+                osc.frequency.value = success ? 880 : 300;
+                gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.02);
+                gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+                osc.start(); osc.stop(ctx.currentTime + 0.5);
+            } catch (e) { /* audio blocked — ignore */ }
+        }
+
         async function pollStatus() {
             if (!currentJobId) return;
 
@@ -1617,6 +1649,7 @@
                     processBtn.disabled = selectedFiles.length === 0;
                     setTabDot('process', '');
                     setTabDot('results', 'done');
+                    notifyJobDone(true, 'Your Gaussian splat is ready to view.');
                     showResults();
                     switchTab('results');
                 } else if (data.status === 'error') {
@@ -1625,6 +1658,7 @@
                     processBtn.disabled = false;
                     stopElapsedTimer();
                     setTabDot('process', 'err');
+                    notifyJobDone(false, data.error || 'Processing failed.');
                     switchTab('create');
                 } else if (data.status === 'cancelled') {
                     showError('Processing was cancelled');
