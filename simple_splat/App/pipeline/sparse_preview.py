@@ -172,11 +172,65 @@ def _write_splat_ply(path, xyz, rgb, scales):
         f.write(data.tobytes())
 
 
+def build_alignment_json(sparse_dir, output_json, max_points=150_000):
+    """Compact JSON for the Three.js alignment viewer (clean wireframe frustums).
+
+    { points:[x,y,z,...], colors:[r,g,b,...], frustums:[[apex3, c0..c3 (12)], ...] }
+    Returns (output_json, num_points, num_cameras).
+    """
+    import json
+    pts_path = os.path.join(sparse_dir, 'points3D.bin')
+    if not os.path.exists(pts_path):
+        raise FileNotFoundError(f"points3D.bin not found in {sparse_dir}")
+
+    xyz, rgb = _read_points3D_bin(pts_path)
+    if len(xyz) > max_points:
+        idx = np.random.choice(len(xyz), max_points, replace=False)
+        xyz, rgb = xyz[idx], rgb[idx]
+
+    extent = float(np.linalg.norm(xyz.max(0) - xyz.min(0))) if len(xyz) else 1.0
+    extent = extent or 1.0
+    depth = extent * 0.035
+
+    frustums, n_cams = [], 0
+    cams_path = os.path.join(sparse_dir, 'cameras.bin')
+    imgs_path = os.path.join(sparse_dir, 'images.bin')
+    if os.path.exists(cams_path) and os.path.exists(imgs_path):
+        cams = _read_cameras_bin(cams_path)
+        for im in _read_images_bin(imgs_path):
+            cam = cams.get(im['cam_id'])
+            if not cam:
+                continue
+            R = _qvec2rotmat(im['qvec']); Rt = R.T
+            C = -Rt @ im['tvec']
+            f = cam['f'] or 1.0
+            W, H = cam['w'], cam['h']
+            row = [round(float(C[0]), 5), round(float(C[1]), 5), round(float(C[2]), 5)]
+            for (px, py) in [(-W / 2, -H / 2), (W / 2, -H / 2), (W / 2, H / 2), (-W / 2, H / 2)]:
+                wc = C + Rt @ np.array([px / f * depth, py / f * depth, depth], np.float64)
+                row += [round(float(wc[0]), 5), round(float(wc[1]), 5), round(float(wc[2]), 5)]
+            frustums.append(row)
+            n_cams += 1
+
+    out = {
+        'points': [round(float(x), 5) for x in xyz.reshape(-1)],
+        'colors': [round(float(c), 4) for c in rgb.reshape(-1)] if len(rgb) else None,
+        'frustums': frustums,
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(output_json)), exist_ok=True)
+    with open(output_json, 'w') as fp:
+        json.dump(out, fp)
+    return output_json, len(xyz), n_cams
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--sparse", "-s", required=True, help="path to sparse/0")
-    ap.add_argument("--output", "-o", required=True, help="output .ply")
+    ap.add_argument("--output", "-o", required=True, help="output .ply or .json")
     args = ap.parse_args()
-    out, npts, ncam = build_alignment_preview(args.sparse, args.output)
+    if args.output.lower().endswith('.json'):
+        out, npts, ncam = build_alignment_json(args.sparse, args.output)
+    else:
+        out, npts, ncam = build_alignment_preview(args.sparse, args.output)
     print(f"Wrote {out}: {npts:,} points + {ncam} cameras")

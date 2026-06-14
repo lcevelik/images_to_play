@@ -747,13 +747,13 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         # Process tab can show the reconstruction the way RealityScan does.
         # Non-fatal — a preview failure must never break the pipeline.
         try:
-            from pipeline.sparse_preview import build_alignment_preview
-            preview_ply = os.path.join(parent_dir, 'alignment_preview.ply')
-            _, _npts, _ncam = build_alignment_preview(sparse_path, preview_ply)
+            from pipeline.sparse_preview import build_alignment_json
+            align_json = os.path.join(parent_dir, 'alignment.json')
+            _, _npts, _ncam = build_alignment_json(sparse_path, align_json)
             processing_status[job_id]['preview_ready'] = True
-            add_log(f"[Preview] Alignment view ready ({_npts:,} points, {_ncam} cameras)", "INFO")
+            add_log(f"[Preview] 3D alignment view ready ({_npts:,} points, {_ncam} cameras)", "INFO")
         except Exception as _pe:
-            add_log(f"[Preview] Could not build alignment preview: {_pe}", "DEBUG")
+            add_log(f"[Preview] Could not build alignment view: {_pe}", "DEBUG")
 
         # Check how many images were actually registered
         try:
@@ -1967,15 +1967,15 @@ def serve_ply(job_id):
     
     return jsonify({'error': 'PLY file not found'}), 404
 
-@app.route('/preview/<job_id>.ply')
-@app.route('/preview/<job_id>')
-def serve_preview(job_id):
-    """Serve the COLMAP alignment preview (sparse points + camera frustums)."""
+@app.route('/align/<job_id>.json')
+@app.route('/align/<job_id>')
+def serve_alignment(job_id):
+    """Serve the 3D alignment view data (sparse points + camera frustums) as JSON."""
     job_folder = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
-    preview = os.path.join(job_folder, 'alignment_preview.ply')
-    if os.path.exists(preview):
-        return send_file(preview, mimetype='application/octet-stream')
-    return jsonify({'error': 'preview not ready'}), 404
+    align = os.path.join(job_folder, 'alignment.json')
+    if os.path.exists(align):
+        return send_file(align, mimetype='application/json')
+    return jsonify({'error': 'alignment not ready'}), 404
 
 @app.route('/download/<job_id>/<file_type>')
 def download_file(job_id, file_type):

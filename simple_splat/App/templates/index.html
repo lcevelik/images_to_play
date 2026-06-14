@@ -1637,7 +1637,7 @@
             const frame = document.getElementById('alignPreview');
             const hint = document.getElementById('alignPreviewHint');
             if (!frame) return;
-            frame.src = `/static/supersplat/index.html?load=/preview/${currentJobId}.ply`;
+            frame.src = `/static/align/viewer.html?job=${currentJobId}`;
             frame.style.display = 'block';
             if (hint) hint.style.display = 'none';
             _previewLoaded = true;

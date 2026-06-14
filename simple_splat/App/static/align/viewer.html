@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alignment Viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0a0e; overflow: hidden; }
+  #c { width: 100%; height: 100%; display: block; }
+  #hint { position: fixed; left: 12px; bottom: 10px; color: #6a6a7a;
+          font: 12px/1.4 system-ui, sans-serif; pointer-events: none; }
+  #stat { position: fixed; right: 12px; top: 10px; color: #8a8a9a;
+          font: 12px/1.4 system-ui, sans-serif; pointer-events: none; text-align: right; }
+  #err { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+         color: #b06; font: 13px system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="stat"></div>
+<div id="hint">drag to orbit · scroll to zoom · right-drag to pan</div>
+<div id="err"></div>
+<script src="three.min.js"></script>
+<script src="OrbitControls.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const job = params.get('job');
+
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0e);
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.001, 100000);
+camera.up.set(0, 0, 1);               // COLMAP world is z-up-ish; orbit feels natural this way
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+function resize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+}
+window.addEventListener('resize', resize);
+resize();
+
+function fail(msg) {
+  const e = document.getElementById('err');
+  e.textContent = msg; e.style.display = 'flex';
+}
+
+function build(data) {
+  const pts = data.points || [];
+  const cols = data.colors || null;
+  const frustums = data.frustums || [];
+
+  // --- bounds (for grid scale + camera fit) ---
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pts.length; i += 3) box.expandByPoint(v.set(pts[i], pts[i+1], pts[i+2]));
+  for (const f of frustums) box.expandByPoint(v.set(f[0], f[1], f[2]));
+  const center = box.getCenter(new THREE.Vector3());
+  const size = Math.max(box.getSize(new THREE.Vector3()).length(), 1);
+
+  // --- point cloud ---
+  if (pts.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    if (cols) g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+    const m = new THREE.PointsMaterial({
+      size: size * 0.0016, sizeAttenuation: true,
+      color: cols ? 0xffffff : 0xc8c8d0, vertexColors: !!cols,
+      transparent: true, opacity: 0.9
+    });
+    scene.add(new THREE.Points(g, m));
+  }
+
+  // --- camera frustums (clean wireframe icons) ---
+  if (frustums.length) {
+    const segs = [];
+    for (const f of frustums) {
+      const A = [f[0], f[1], f[2]];
+      const C = [[f[3],f[4],f[5]], [f[6],f[7],f[8]], [f[9],f[10],f[11]], [f[12],f[13],f[14]]];
+      // apex -> 4 corners
+      for (const c of C) segs.push(A[0],A[1],A[2], c[0],c[1],c[2]);
+      // base rectangle
+      for (let i = 0; i < 4; i++) { const a = C[i], b = C[(i+1)%4]; segs.push(a[0],a[1],a[2], b[0],b[1],b[2]); }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3));
+    scene.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xdfe4ee, transparent: true, opacity: 0.85 })));
+  }
+
+  // --- ground grid under the scene ---
+  const grid = new THREE.GridHelper(size * 2.5, 50, 0x444455, 0x23232e);
+  grid.rotation.x = Math.PI / 2;                 // grid in world XY (z-up)
+  grid.position.set(center.x, center.y, box.min.z - size * 0.02);
+  scene.add(grid);
+  scene.add(new THREE.AxesHelper(size * 0.08));
+
+  // --- fit camera ---
+  controls.target.copy(center);
+  camera.position.set(center.x + size * 0.7, center.y - size * 0.9, center.z + size * 0.6);
+  controls.update();
+
+  document.getElementById('stat').textContent =
+    `${(pts.length/3).toLocaleString()} points · ${frustums.length} cameras`;
+}
+
+function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); }
+loop();
+
+if (!job) { fail('No ?job= specified'); }
+else {
+  fetch(`/align/${job}.json`)
+    .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+    .then(build)
+    .catch(e => fail('Alignment data not ready (' + e + ')'));
+}
+</script>
+</body>
+</html>
