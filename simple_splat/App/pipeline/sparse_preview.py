@@ -73,6 +73,27 @@ def _qvec2rotmat(q):
     ], np.float64)
 
 
+def _level_rotation(up, target=np.array([0.0, 0.0, 1.0])):
+    """Rotation that maps `up` onto `target` (+Z), to level the scene.
+
+    COLMAP's world has no canonical up, so the cluster looks rotated. The mean
+    camera up-vector ≈ true up (photos are taken roughly upright), so rotating
+    that onto +Z stands the scene upright on the viewer's ground grid.
+    """
+    n = np.linalg.norm(up)
+    if n < 1e-8:
+        return np.eye(3)
+    a = up / n
+    b = target / (np.linalg.norm(target) or 1.0)
+    v = np.cross(a, b)
+    c = float(np.dot(a, b))
+    s = float(np.linalg.norm(v))
+    if s < 1e-8:                       # already aligned, or exactly opposite
+        return np.eye(3) if c > 0 else np.diag([1.0, -1.0, -1.0])
+    vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s))
+
+
 def _rgb_to_f_dc(rgb01):
     return (np.clip(rgb01, 0.0, 1.0) - 0.5) / _C0
 
@@ -189,21 +210,25 @@ def build_alignment_json(sparse_dir, output_json, max_points=150_000):
         xyz, rgb = xyz[idx], rgb[idx]
 
     frustums, n_cams = [], 0
+    R_level = np.eye(3)
     cams_path = os.path.join(sparse_dir, 'cameras.bin')
     imgs_path = os.path.join(sparse_dir, 'images.bin')
     if os.path.exists(cams_path) and os.path.exists(imgs_path):
         cams = _read_cameras_bin(cams_path)
         images = _read_images_bin(imgs_path)
 
-        # Camera centers, used to size the frustums relative to the CAMERA spread
-        # (robust to scattered point-cloud outliers, which would otherwise make the
-        # frustums huge). Each frustum is a small fraction of the camera arrangement.
-        centers = []
+        # Camera centers + up-vectors. Centers size the frustums relative to the
+        # CAMERA spread (robust to point-cloud outliers); the mean up-vector levels
+        # the whole scene so it stands upright on the grid (COLMAP world has no up).
+        centers, ups = [], []
         for im in images:
-            centers.append(-_qvec2rotmat(im['qvec']).T @ im['tvec'])
+            Rt = _qvec2rotmat(im['qvec']).T
+            centers.append(-Rt @ im['tvec'])
+            ups.append(-Rt[:, 1])            # COLMAP camera Y is down → world up = -Y_cam
         if centers:
             ca = np.array(centers)
-            cam_extent = float(np.linalg.norm(ca.max(0) - ca.min(0)))
+            cam_extent = float(np.linalg.norm(ca.max(0) - ca.min(0))) or 1.0
+            R_level = _level_rotation(np.array(ups).mean(0))
         else:
             cam_extent = 1.0
         depth = max(cam_extent * 0.045, 1e-4)   # small, distinguishable camera icons
@@ -212,20 +237,22 @@ def build_alignment_json(sparse_dir, output_json, max_points=150_000):
             cam = cams.get(im['cam_id'])
             if not cam:
                 continue
-            R = _qvec2rotmat(im['qvec']); Rt = R.T   # Rt = camera-to-world; +Z is the view direction
+            Rt = _qvec2rotmat(im['qvec']).T      # camera-to-world; +Z is the view direction
             C = -Rt @ im['tvec']
             f = cam['f'] or 1.0
             W, H = cam['w'], cam['h']
             # clamp the half-angle so wide/odd intrinsics don't blow the frustum up
             hx = min((W / 2) / f, 0.9)
             hy = min((H / 2) / f, 0.9)
-            row = [round(float(C[0]), 5), round(float(C[1]), 5), round(float(C[2]), 5)]
-            for (sx, sy) in [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]:
-                wc = C + Rt @ np.array([sx * depth, sy * depth, depth], np.float64)
-                row += [round(float(wc[0]), 5), round(float(wc[1]), 5), round(float(wc[2]), 5)]
+            row = []
+            for p in [C] + [C + Rt @ np.array([sx * depth, sy * depth, depth], np.float64)
+                            for (sx, sy) in [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]]:
+                lp = R_level @ p             # level into viewer up (+Z)
+                row += [round(float(lp[0]), 5), round(float(lp[1]), 5), round(float(lp[2]), 5)]
             frustums.append(row)
             n_cams += 1
 
+    xyz = xyz @ R_level.T                     # level the point cloud too
     out = {
         'points': [round(float(x), 5) for x in xyz.reshape(-1)],
         'colors': [round(float(c), 4) for c in rgb.reshape(-1)] if len(rgb) else None,
