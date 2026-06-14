@@ -1,15 +1,76 @@
 """Build a SuperSplat-viewable 3D preview of the COLMAP alignment.
 
-Encodes the sparse point cloud (real colors) + every camera as a small frustum
-wireframe — all as tiny Gaussians — into one 3DGS PLY. This lets the existing
-SuperSplat viewer show the reconstruction the way RealityScan's alignment view
-does, with no second 3D engine. Reads sparse/0 via pycolmap (bundled).
+Parses COLMAP's binary model DIRECTLY (no pycolmap — the bundled Python doesn't
+ship it). Sparse points keep their real colors; each registered camera becomes a
+small cyan frustum wireframe; everything is written as tiny Gaussians so the
+existing splat viewer shows it like RealityScan's alignment view.
 """
 import os
+import struct
 import numpy as np
 
-# SH degree-0 basis: rendered_color = 0.5 + C0 * f_dc  →  f_dc = (color - 0.5)/C0
+# SH degree-0 basis: rendered_color = 0.5 + C0 * f_dc  ->  f_dc = (color - 0.5)/C0
 _C0 = 0.28209479177387814
+
+# COLMAP camera model id -> number of intrinsic params (params[0] is always a focal)
+_MODEL_NUM_PARAMS = {0: 3, 1: 4, 2: 4, 3: 5, 4: 8, 5: 8, 6: 12, 7: 5, 8: 4, 9: 5, 10: 12}
+
+
+def _read_points3D_bin(path):
+    xyz, rgb = [], []
+    with open(path, 'rb') as f:
+        n = struct.unpack('<Q', f.read(8))[0]
+        for _ in range(n):
+            f.read(8)                                   # point3D_id
+            x, y, z = struct.unpack('<ddd', f.read(24))
+            r, g, b = struct.unpack('<BBB', f.read(3))
+            f.read(8)                                   # reprojection error
+            track_len = struct.unpack('<Q', f.read(8))[0]
+            f.read(track_len * 8)                        # skip track (image_id+idx pairs)
+            xyz.append((x, y, z)); rgb.append((r, g, b))
+    xyz = np.array(xyz, np.float32) if xyz else np.zeros((0, 3), np.float32)
+    rgb = (np.array(rgb, np.float32) / 255.0) if rgb else np.zeros((0, 3), np.float32)
+    return xyz, rgb
+
+
+def _read_cameras_bin(path):
+    cams = {}
+    with open(path, 'rb') as f:
+        n = struct.unpack('<Q', f.read(8))[0]
+        for _ in range(n):
+            cam_id, model_id, width, height = struct.unpack('<iiQQ', f.read(24))
+            k = _MODEL_NUM_PARAMS.get(model_id, 4)
+            params = struct.unpack('<' + 'd' * k, f.read(8 * k))
+            cams[cam_id] = {'w': int(width), 'h': int(height), 'f': float(params[0])}
+    return cams
+
+
+def _read_images_bin(path):
+    imgs = []
+    with open(path, 'rb') as f:
+        n = struct.unpack('<Q', f.read(8))[0]
+        for _ in range(n):
+            d = struct.unpack('<idddddddi', f.read(64))   # id, qw,qx,qy,qz, tx,ty,tz, cam_id
+            qvec = np.array(d[1:5], np.float64)
+            tvec = np.array(d[5:8], np.float64)
+            cam_id = d[8]
+            while True:                                    # image name (null-terminated)
+                c = f.read(1)
+                if c in (b'\x00', b''):
+                    break
+            num2d = struct.unpack('<Q', f.read(8))[0]
+            f.read(num2d * 24)                             # skip 2D points (x,y double + id uint64)
+            imgs.append({'qvec': qvec, 'tvec': tvec, 'cam_id': cam_id})
+    return imgs
+
+
+def _qvec2rotmat(q):
+    w, x, y, z = q
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y)],
+        [2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y)],
+    ], np.float64)
 
 
 def _rgb_to_f_dc(rgb01):
@@ -21,60 +82,53 @@ def build_alignment_preview(sparse_dir, output_ply, max_points=500_000):
 
     Returns (output_ply, num_points, num_cameras).
     """
-    import pycolmap
-    recon = pycolmap.Reconstruction(sparse_dir)
+    pts_path = os.path.join(sparse_dir, 'points3D.bin')
+    cams_path = os.path.join(sparse_dir, 'cameras.bin')
+    imgs_path = os.path.join(sparse_dir, 'images.bin')
+    if not os.path.exists(pts_path):
+        raise FileNotFoundError(f"points3D.bin not found in {sparse_dir}")
 
-    # --- scene points (their real colors) ---
-    xyz, rgb = [], []
-    for _, pt in recon.points3D.items():
-        xyz.append(pt.xyz)
-        rgb.append(pt.color[:3])
-    xyz = np.array(xyz, dtype=np.float32) if xyz else np.zeros((0, 3), np.float32)
-    rgb = (np.array(rgb, dtype=np.float32) / 255.0) if len(rgb) else np.zeros((0, 3), np.float32)
-
+    xyz, rgb = _read_points3D_bin(pts_path)
     if len(xyz) > max_points:
         idx = np.random.choice(len(xyz), max_points, replace=False)
         xyz, rgb = xyz[idx], rgb[idx]
 
-    # Scene extent drives point/frustum sizing so it looks right at any scale.
-    if len(xyz):
-        extent = float(np.linalg.norm(xyz.max(0) - xyz.min(0))) or 1.0
-    else:
-        extent = 1.0
+    extent = float(np.linalg.norm(xyz.max(0) - xyz.min(0))) if len(xyz) else 1.0
+    extent = extent or 1.0
     pt_scale = max(extent * 0.0015, 1e-4)
 
     # --- camera frustums (bright cyan, drawn as edge dots) ---
     cam_xyz, cam_rgb = [], []
-    frustum_color = np.array([0.0, 0.9, 1.0], np.float32)  # cyan
-    depth = extent * 0.04
-    per_edge = 14
-    for _, image in recon.images.items():
-        w2c = np.eye(4, dtype=np.float32)
-        w2c[:3, :] = np.array(image.cam_from_world().matrix(), dtype=np.float32)
-        c2w = np.linalg.inv(w2c)
-        C = c2w[:3, 3]
-        R = c2w[:3, :3]
-        cam = recon.cameras[image.camera_id]
-        fx = float(cam.focal_length_x) or 1.0
-        fy = float(cam.focal_length_y) or fx
-        W, H = cam.width, cam.height
-
-        # image-plane corners projected to `depth` in camera space, then to world
-        corners_cam = [
-            np.array([(px) / fx * depth, (py) / fy * depth, depth], np.float32)
-            for (px, py) in [(-W / 2, -H / 2), (W / 2, -H / 2), (W / 2, H / 2), (-W / 2, H / 2)]
-        ]
-        corners_w = [C + R @ c for c in corners_cam]
-        edges = [(C, cw) for cw in corners_w]                       # apex → corners
-        edges += [(corners_w[i], corners_w[(i + 1) % 4]) for i in range(4)]  # image rectangle
-        for a, b in edges:
-            for t in np.linspace(0.0, 1.0, per_edge):
-                cam_xyz.append(a * (1 - t) + b * t)
-                cam_rgb.append(frustum_color)
+    frustum_color = np.array([0.0, 0.9, 1.0], np.float32)
+    if os.path.exists(cams_path) and os.path.exists(imgs_path):
+        cams = _read_cameras_bin(cams_path)
+        depth = extent * 0.04
+        per_edge = 14
+        for im in _read_images_bin(imgs_path):
+            cam = cams.get(im['cam_id'])
+            if not cam:
+                continue
+            R = _qvec2rotmat(im['qvec'])      # world-to-camera
+            Rt = R.T                          # camera-to-world rotation
+            C = -Rt @ im['tvec']              # camera center in world
+            f = cam['f'] or 1.0
+            W, H = cam['w'], cam['h']
+            corners_cam = [
+                np.array([px / f * depth, py / f * depth, depth], np.float64)
+                for (px, py) in [(-W / 2, -H / 2), (W / 2, -H / 2), (W / 2, H / 2), (-W / 2, H / 2)]
+            ]
+            corners_w = [C + Rt @ c for c in corners_cam]
+            edges = [(C, cw) for cw in corners_w] + \
+                    [(corners_w[i], corners_w[(i + 1) % 4]) for i in range(4)]
+            for a, b in edges:
+                for t in np.linspace(0.0, 1.0, per_edge):
+                    cam_xyz.append((a * (1 - t) + b * t).astype(np.float32))
+                    cam_rgb.append(frustum_color)
 
     cam_xyz = np.array(cam_xyz, np.float32) if cam_xyz else np.zeros((0, 3), np.float32)
     cam_rgb = np.array(cam_rgb, np.float32) if len(cam_rgb) else np.zeros((0, 3), np.float32)
     cam_scale = max(extent * 0.0012, 1e-4)
+    num_cams = len(cam_xyz) // (14 * 8) if len(cam_xyz) else 0
 
     all_xyz = np.concatenate([xyz, cam_xyz], 0)
     all_rgb = np.concatenate([rgb, cam_rgb], 0)
@@ -83,7 +137,7 @@ def build_alignment_preview(sparse_dir, output_ply, max_points=500_000):
         np.full((len(cam_xyz),), cam_scale, np.float32),
     ])
     _write_splat_ply(output_ply, all_xyz, all_rgb, scales)
-    return output_ply, len(xyz), len(recon.images)
+    return output_ply, len(xyz), num_cams
 
 
 def _write_splat_ply(path, xyz, rgb, scales):
@@ -101,7 +155,7 @@ def _write_splat_ply(path, xyz, rgb, scales):
     data = np.zeros(N, dtype=dtype)
     data['x'], data['y'], data['z'] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
     data['f_dc_0'], data['f_dc_1'], data['f_dc_2'] = f_dc[:, 0], f_dc[:, 1], f_dc[:, 2]
-    data['opacity'] = 8.0                                   # logit → effectively opaque
+    data['opacity'] = 8.0                                   # logit -> effectively opaque
     log_scale = np.log(np.clip(scales, 1e-8, None)).astype(np.float32)
     data['scale_0'] = data['scale_1'] = data['scale_2'] = log_scale
     data['rot_0'] = 1.0                                     # identity quaternion (isotropic)
