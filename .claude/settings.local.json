@@ -112,7 +112,18 @@
       "Bash(cp \"F:/Codebase/images_to_play/simple_splat/App/app.py\" \"F:/Codebase/images_to_play/packaging/dist/FonixFlowSplat_Lite_v0.1.0/App/app.py\")",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"name='python.exe'\\\\\" | Select-Object ProcessId, CommandLine | Format-Table -AutoSize -Wrap\")",
       "Bash(powershell -Command \"Stop-Process -Id 234100 -Force; Stop-Process -Id 224672 -Force\")",
-      "Bash(powershell -Command 'Get-Process | Where-Object { $_.ProcessName -match '\\\\''brush|colmap|python'\\\\'' } | Select-Object Id, ProcessName | Format-Table -AutoSize')"
+      "Bash(powershell -Command 'Get-Process | Where-Object { $_.ProcessName -match '\\\\''brush|colmap|python'\\\\'' } | Select-Object Id, ProcessName | Format-Table -AutoSize')",
+      "Bash(python sparse_preview.py -s \"F:/Codebase/images_to_play/packaging/dist/FonixFlowSplat_Lite_v0.1.0/App/processing/62306a36-ecc3-4b31-9460-d753e3a3def5/sparse/0\" -o \"F:/Codebase/images_to_play/_preview_test.ply\")",
+      "Bash(python -c \"import os; p='F:/Codebase/images_to_play/_preview_test.ply'; s=os.stat\\(p\\); print\\('PLY size:', round\\(s.st_size/1024,1\\),'KB'\\); h=open\\(p,'rb'\\).read\\(160\\).decode\\('ascii','replace'\\); print\\(h[:140]\\)\")",
+      "Bash(git mv *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); print\\('app.py: syntax OK'\\)\")",
+      "Bash(python -c \"import pipeline.run_glomap, pipeline.dense_reconstruction, pipeline.gaussian_splat_utils, pipeline.sparse_preview, pipeline.camera_tracking, pipeline.gsplat_mcmc_trainer; print\\('all 6 pipeline modules import OK'\\)\")",
+      "Bash(curl -s -o /dev/null -w \"homepage: HTTP %{http_code}\\\\n\" http://localhost:5000/)",
+      "Bash(rm -f run_glomap.py dense_reconstruction.py gaussian_splat_utils.py gsplat_mcmc_trainer.py sparse_preview.py camera_tracking.py test_mcmc_smoke.py test_all_presets.py README.md SETUP.md MODULES.md)",
+      "Bash(rm -rf __pycache__)",
+      "Bash(mkdir -p pipeline tests)",
+      "Bash(cp F:/Codebase/images_to_play/simple_splat/App/app.py app.py)",
+      "Bash(cp F:/Codebase/images_to_play/simple_splat/App/pipeline/*.py pipeline/)"
     ],
     "additionalDirectories": [
       "f:\\Codebase\\images_to_play\\.claude"

@@ -3,15 +3,18 @@ Smoke test for gsplat_mcmc_trainer: train on a synthetic scene and assert
 the loss collapses. Catches broken gradient flow, optimizer wiring, and
 MCMC strategy integration without needing a COLMAP reconstruction.
 
-Run:  python test_mcmc_smoke.py
+Run:  python tests/test_mcmc_smoke.py   (from simple_splat/App/)
 """
 
 import os
+import sys
 import tempfile
 import numpy as np
 import torch
 
-import gsplat_mcmc_trainer as trainer_mod
+# App/ dir on sys.path so the `pipeline` package is importable from tests/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from pipeline import gsplat_mcmc_trainer as trainer_mod
 
 
 def look_at_w2c(eye, target=np.zeros(3), up=np.array([0.0, 0.0, 1.0])):

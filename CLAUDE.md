@@ -10,7 +10,10 @@ Three independent sub-projects in one repo:
 simple_splat/App/     — Flask web app: image → 3D Gaussian Splat pipeline
 supersplat-src/       — SuperSplat viewer source (TypeScript/Rollup, builds to simple_splat/App/static/supersplat/)
 ml-sharp/             — Apple ML-Sharp single-image Gaussian splat model (Python package)
+docs/                 — reference docs (APP_GUIDE, SETUP, MODULES, FULL_EDITION_PLAN)
 ```
+
+**App layout (reorganized 2026-06-14):** `app.py` (entry point) + `batch_processing.py` stay at `simple_splat/App/`; the processing modules live in `simple_splat/App/pipeline/` (`run_glomap`, `dense_reconstruction`, `gaussian_splat_utils`, `gsplat_mcmc_trainer`, `sparse_preview`, `camera_tracking`); tests in `simple_splat/App/tests/`. `app.py` imports them as `from pipeline.X import …`. Standalone CLIs run as `python pipeline/run_glomap.py …`, `python pipeline/gsplat_mcmc_trainer.py …`, etc. `CLAUDE.md` + `PROJECT.md` stay at repo root.
 
 ---
 
@@ -250,14 +253,14 @@ Elapsed time per stage tracked in `processing_status[job_id]['stages']`. Fronten
 
 ### Phase 3 — gsplat MCMC Trainer ✅ DONE
 
-#### 3.1 `simple_splat/App/gsplat_mcmc_trainer.py` ✅
+#### 3.1 `simple_splat/App/pipeline/gsplat_mcmc_trainer.py` ✅
 Implements `load_colmap_dataset()` and `train_mcmc()` using gsplat's `MCMCStrategy` and `rasterization()`. Uses `SelectiveAdam` optimizer per parameter group. Hyperparameters follow gsplat's reference `examples/simple_trainer.py` (mcmc preset): per-param LRs, means lr × scene_scale with exponential decay to 1%, opacity/scale L1 regularization (0.01 each — required for MCMC relocation to work), SH degree warmup (one band per 1000 steps).
 
 **Critical:** pycolmap's `image.cam_from_world` is already world-to-camera (w2c) and gsplat's `rasterization(viewmats=...)` expects w2c — pass it through directly, do NOT invert.
 
 **Critical:** optimizers must be built over the same `ParameterDict` entries used in the render graph — building them over pre-copy tensors leaves `grad=None` and `SelectiveAdam` silently skips the update.
 
-Smoke test: `python test_mcmc_smoke.py` (needs CUDA + MSVC on PATH) — trains a synthetic scene and asserts loss collapse, PSNR gain, and MCMC growth.
+Smoke test: `python tests/test_mcmc_smoke.py` (needs CUDA + MSVC on PATH) — trains a synthetic scene and asserts loss collapse, PSNR gain, and MCMC growth.
 
 #### 3.2 Integration into `app.py` ✅
 Trainer selector in UI: "Brush" (default) / "gsplat MCMC". Branches in `process_images_async()` after COLMAP completes. Falls back to Brush on error.

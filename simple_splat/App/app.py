@@ -30,7 +30,7 @@ except ImportError:
 
 # Camera tracking
 try:
-    from camera_tracking import extract_camera_poses, export_camera_json, export_camera_gltf, export_camera_fbx, export_blender_script, export_point_cloud_ply
+    from pipeline.camera_tracking import extract_camera_poses, export_camera_json, export_camera_gltf, export_camera_fbx, export_blender_script, export_point_cloud_ply
     CAMERA_TRACKING_AVAILABLE = True
 except ImportError:
     CAMERA_TRACKING_AVAILABLE = False
@@ -615,7 +615,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         add_log(f"Found {len(image_files)} images to process", "INFO")
         
         # Import and run the glomap processing
-        from run_glomap import run_colmap, set_progress_callback
+        from pipeline.run_glomap import run_colmap, set_progress_callback
         
         # Set up progress callback to route COLMAP logs to our log system
         def colmap_progress_callback(message, level):
@@ -641,7 +641,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         
         # FIX #2: Use cached COLMAP path from run_glomap (probed once, not per-job)
         add_log("Checking COLMAP installation...", "INFO")
-        from run_glomap import get_colmap_path
+        from pipeline.run_glomap import get_colmap_path
         colmap_path = get_colmap_path()
         if not colmap_path:
             add_log("COLMAP not found!", "ERROR")
@@ -747,7 +747,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         # Process tab can show the reconstruction the way RealityScan does.
         # Non-fatal — a preview failure must never break the pipeline.
         try:
-            from sparse_preview import build_alignment_preview
+            from pipeline.sparse_preview import build_alignment_preview
             preview_ply = os.path.join(parent_dir, 'alignment_preview.ply')
             _, _npts, _ncam = build_alignment_preview(sparse_path, preview_ply)
             processing_status[job_id]['preview_ready'] = True
@@ -821,7 +821,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             processing_status[job_id]['progress'] = 55
 
             try:
-                from dense_reconstruction import run_dense_reconstruction
+                from pipeline.dense_reconstruction import run_dense_reconstruction
 
                 add_log("Starting dense reconstruction for millions of points...", "INFO")
                 add_log(f"Max image size: {max_image_size}px", "INFO")
@@ -873,7 +873,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         if trainer_choice == 'mcmc' and not ply_generated:
             add_log("Using gsplat MCMC trainer (explicit Gaussian cap, stochastic relocation)", "INFO")
             try:
-                from gsplat_mcmc_trainer import train_mcmc
+                from pipeline.gsplat_mcmc_trainer import train_mcmc
                 mcmc_output = os.path.join(parent_dir, 'gaussian_splat.ply')
                 mcmc_train_start = time.time()
 
@@ -1168,7 +1168,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
                         # Prune near-invisible Gaussians — removes ~50% with no visible quality change
                         try:
-                            from gaussian_splat_utils import prune_gaussian_ply
+                            from pipeline.gaussian_splat_utils import prune_gaussian_ply
                             orig, kept = prune_gaussian_ply(output_ply, opacity_threshold=0.005)
                             if orig > 0:
                                 reduction = (1 - kept / orig) * 100
@@ -1206,7 +1206,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             processing_status[job_id]['progress'] = 80
             
             try:
-                from gaussian_splat_utils import generate_ply_from_colmap
+                from pipeline.gaussian_splat_utils import generate_ply_from_colmap
                 output_ply = os.path.join(parent_dir, 'point_cloud.ply')
                 ply_generated = generate_ply_from_colmap(sparse_path, output_ply)
                 if ply_generated:
@@ -1959,7 +1959,7 @@ def serve_ply(job_id):
         if os.path.exists(sparse_path):
             output_ply = os.path.join(job_folder, 'point_cloud.ply')
             try:
-                from gaussian_splat_utils import generate_ply_from_colmap
+                from pipeline.gaussian_splat_utils import generate_ply_from_colmap
                 if generate_ply_from_colmap(sparse_path, output_ply):
                     return send_file(output_ply, mimetype='application/octet-stream')
             except Exception as e:
@@ -2015,7 +2015,7 @@ def download_file(job_id, file_type):
         if sparse_path and os.path.exists(sparse_path):
             output_ply = os.path.join(output_path, 'point_cloud.ply')
             try:
-                from gaussian_splat_utils import generate_ply_from_colmap
+                from pipeline.gaussian_splat_utils import generate_ply_from_colmap
                 if generate_ply_from_colmap(sparse_path, output_ply):
                     return send_file(output_ply, as_attachment=True, download_name=download_name)
             except Exception as e:

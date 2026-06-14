@@ -2,6 +2,8 @@
 
 This document explains what each `.py` file does, what functions it exposes, and how all the modules interact during a processing job.
 
+> **Layout (reorganized 2026-06-14):** `app.py` and `batch_processing.py` live at `simple_splat/App/`; the processing modules (`run_glomap`, `dense_reconstruction`, `gaussian_splat_utils`, `gsplat_mcmc_trainer`, `sparse_preview`, `camera_tracking`) live in `simple_splat/App/pipeline/` and are imported as `from pipeline.X import …`. Tests live in `simple_splat/App/tests/`. Standalone CLIs: `python pipeline/run_glomap.py …`, `python pipeline/gsplat_mcmc_trainer.py …`, `python tests/test_mcmc_smoke.py`.
+
 ---
 
 ## Module Overview
