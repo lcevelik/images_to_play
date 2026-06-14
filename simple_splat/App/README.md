@@ -25,6 +25,7 @@ This is a **fully standalone package** — Python, COLMAP, Brush, all Python dep
 - **Two Trainers**: Brush (standard 3DGS, default) or gsplat MCMC (auto Gaussian cap that scales to the scene, LPIPS loss, often higher quality — NVIDIA only)
 - **Dense Reconstruction**: Optional COLMAP MVS for millions of points (off by default; toggle via upload form)
 - **Camera Tracking Export**: FBX / GLTF / JSON / Blender script camera paths from the results panel
+- **3D Alignment Preview**: the Process tab shows the sparse point cloud + camera frustums in 3D (RealityScan-style) as soon as COLMAP finishes, then training continues
 - **Browser Viewer**: PlayCanvas SuperSplat (WebGPU-accelerated, no install needed)
 - **Open Splat File**: Upload an existing `.ply` or `.splat` file for direct viewing
 - **Download**: Export the trained `.ply` file or sparse reconstruction `.zip`

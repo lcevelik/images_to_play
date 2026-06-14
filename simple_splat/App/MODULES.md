@@ -13,6 +13,8 @@ app.py                  <- Web server + job orchestrator (entry point)
   |
   +-- gsplat_mcmc_trainer.py   <- gsplat MCMC trainer (used when trainer='mcmc' is selected)
   |
+  +-- sparse_preview.py        <- 3D alignment preview: sparse points + camera frustums -> SuperSplat
+  |
   +-- dense_reconstruction.py  <- Standalone dense MVS fallback (used only if run_glomap skips MVS)
   |
   +-- gaussian_splat_utils.py  <- PLY fallback (used only if Brush training fails)
@@ -335,6 +337,27 @@ Low-level PLY writer. Writes an ASCII PLY file from a list of `[x, y, z]` points
 ### Verification
 
 `test_mcmc_smoke.py` — builds a synthetic Gaussian scene, renders GT views, runs the real `train_mcmc()` loop (monkeypatched loader), asserts loss collapse, ≥6 dB PSNR gain, MCMC growth, and that the exported PLY **reloaded viewer-style** renders within 6 dB of training quality (catches export-format bugs). Needs CUDA + MSVC on PATH.
+
+---
+
+## `sparse_preview.py` — 3D Alignment Preview
+
+**Role:** Build a SuperSplat-viewable preview of the COLMAP alignment so the Process tab can show the reconstruction the way RealityScan does — without a second 3D engine. Called by `app.py` right after COLMAP confirms `sparse/0/` (non-fatal on error).
+
+### Function
+
+`build_alignment_preview(sparse_dir, output_ply, max_points=500_000)` → `(output_ply, num_points, num_cameras)`
+
+- Reads `cameras.bin` / `images.bin` / `points3D.bin` **directly with `struct`** — **no pycolmap** (the bundled Python 3.11 doesn't have it; pycolmap-based code fails with `No module named 'pycolmap'`).
+- Sparse points keep their real RGB; each registered camera becomes a small **cyan frustum wireframe**.
+- Everything is written as **tiny Gaussians** (SH degree 0) into one 3DGS PLY so the existing splat viewer renders it. Sizes scale to scene extent.
+
+### Wiring
+
+- `app.py` writes `processing/<uuid>/alignment_preview.ply` and sets `processing_status[job_id]['preview_ready'] = True`.
+- Route `/preview/<job_id>.ply` serves it.
+- The Process-tab `<iframe id="alignPreview">` loads `…/supersplat/index.html?load=/preview/<job_id>.ply` once `preview_ready` is seen in `/status`.
+- Standalone: `python sparse_preview.py -s <sparse/0> -o <out.ply>`.
 
 ---
 
