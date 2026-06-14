@@ -17,8 +17,8 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## To Do
 
-- [ ] Expose `mcmc_cap` in Settings UI (default 1M; RTX 8000 handles 2–4M — biggest quality lever for detailed scenes)
-- [ ] Head-to-head benchmark: Brush vs MCMC on the same 74-photo capture, same steps, PSNR on held views
+- [ ] Expose `mcmc_cap` in Settings UI (auto by default; RTX 8000 handles 2–4M — biggest quality lever for detailed scenes)
+- [ ] Head-to-head benchmark: Brush vs MCMC on the same 74-photo capture, same steps, PSNR on held views (samples uploaded to gallery)
 - [ ] gsplat quality flags: `rasterize_mode="antialiased"` (check SuperSplat compat) and bilateral grid for auto-exposure captures
 - [ ] VGGT / MASt3R-SfM fallback when COLMAP registration fails (write COLMAP-format output, continue pipeline)
 - [ ] Optional: rename `simple_splat/` directory to match FonixFlow branding (touches CLAUDE.md, Brush path, scripts)
@@ -27,6 +27,9 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## Done
 
+- [x] 2026-06-13 — Auto MCMC Gaussian cap scaled to sparse-point count (omit --cap-max = scene-aware, range 0.5M–2M)
+- [x] 2026-06-13 — MCMC 4M Gaussians trained (1h37m RTX 8000), uploaded to splat.steadiczech.com as comparison sample
+- [x] 2026-06-13 — Brush 50k-steps run completed and uploaded to splat.steadiczech.com for Brush vs MCMC comparison
 - [x] 2026-06-12 — MCMC trainer fixed (viewmats w2c, optimizer wiring, SSIM, PLY export) and verified: 39 dB synthetic, 25.5 dB real capture
 - [x] 2026-06-12 — Smoke test `test_mcmc_smoke.py` incl. viewer-style PLY reload check
 - [x] 2026-06-12 — LPIPS on 512px crop (was full-res — 10× slower, VRAM risk)

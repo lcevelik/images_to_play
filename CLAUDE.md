@@ -89,6 +89,14 @@ simple_splat/App/processing/<uuid>/
 └── colmap_run.log       — full COLMAP command transcript
 ```
 
+### MCMC auto-cap
+
+When `--cap-max` is omitted, the trainer auto-scales the Gaussian cap to the sparse-point count:
+- `cap = sparse_pts × 30`, clamped to **500k–2M**
+- The app (`app.py`) also uses auto by default (no more hardcoded 1M)
+- Explicit `--cap-max N` still works for manual control
+
+### External binaries
 ### External binaries
 
 | Binary | Location | Required |
