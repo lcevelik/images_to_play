@@ -1985,8 +1985,10 @@ def serve_ply(job_id):
 @app.route('/align/<job_id>')
 def serve_alignment(job_id):
     """Serve the 3D alignment view data (sparse points + camera frustums) as JSON."""
-    job_folder = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
-    align = os.path.join(job_folder, 'alignment.json')
+    # Absolute path: os.path.exists resolves against cwd, but Flask's send_file
+    # resolves a relative path against app.root_path — they disagree when the
+    # server is launched from a different working directory. abspath unifies them.
+    align = os.path.abspath(os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'alignment.json'))
     if os.path.exists(align):
         return send_file(align, mimetype='application/json')
     return jsonify({'error': 'alignment not ready'}), 404
