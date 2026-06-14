@@ -294,6 +294,15 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     detail_settings = _json_presets if _json_presets else detail_settings
     settings = detail_settings.get(detail_level, detail_settings['medium'])
 
+    # High-quality SfM flags (closing the gap to RealityScan): applied to
+    # high/quality/expert. They markedly improve match robustness and pose
+    # tightness — at a feature-extraction speed cost — so low/medium stay fast.
+    #   #1 less downscaling (FeatureExtraction.max_image_size)
+    #   #2 affine-shape SIFT + domain-size pooling (far more robust keypoints)
+    #   #3 guided matching (re-check matches against epipolar geometry)
+    #   #4 BA refine principal point (tighter intrinsics)
+    hq = detail_level in ('high', 'quality', 'expert')
+
     # Apply dense override if specified
     if enable_dense_override is not None:
         settings = dict(settings)
@@ -459,11 +468,11 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             f'--GlobalMapper.tri_complete_max_reproj_error {gm_complete_err} '
             f'--GlobalMapper.tri_merge_max_reproj_error {gm_merge_err}'
         )
-        # Expert preset: enable principal-point refinement (off by default in
+        # HQ presets: enable principal-point refinement (off by default in
         # GlobalMapper; focal-length and extra-params refinement are already on).
-        if settings.get('expert', False) or settings.get('refine_principal', False):
+        if hq or settings.get('refine_principal', False):
             mapper_cmd += ' --GlobalMapper.ba_refine_principal_point 1'
-            log_progress("[EXPERT] GlobalMapper principal-point refinement: ENABLED", "INFO")
+            log_progress("[HQ] GlobalMapper principal-point refinement: ENABLED", "INFO")
         log_progress(f"[MAP] GlobalMapper tri_min_angle={gm_tri_angle}, reproj_error={gm_complete_err}px (preset-tuned)", "INFO")
         print("Using COLMAP global_mapper (faster global SfM)")
     else:
@@ -532,17 +541,17 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
 
     log_progress(f"[CPU] Using {num_threads} threads for feature extraction", "INFO")
     
-    # Expert mode: add advanced feature extraction options
-    if settings.get('expert', False):
+    # HQ presets: advanced feature extraction (#1 less downscaling, #2 robust SIFT)
+    if hq:
+        hq_max_size = settings.get("max_image_size", 6400)  # COLMAP default 3200 downscales phone photos; raise it
         feature_cmd += (
             f' --SiftExtraction.domain_size_pooling 1'
             f' --SiftExtraction.estimate_affine_shape 1'
-            f' --FeatureExtraction.max_image_size {settings.get("max_image_size", 8192)}'
+            f' --FeatureExtraction.max_image_size {hq_max_size}'
             # FeatureExtraction.max_image_size is correct in both 3.x and 4.x
         )
-        log_progress("[EXPERT] Domain size pooling: ENABLED", "INFO")
-        log_progress("[EXPERT] Affine shape estimation: ENABLED", "INFO")
-        log_progress(f"[EXPERT] Max image size: {settings.get('max_image_size', 8192)}px", "INFO")
+        log_progress("[HQ] Affine-shape SIFT + domain-size pooling: ENABLED (more robust keypoints)", "INFO")
+        log_progress(f"[HQ] Max image size: {hq_max_size}px (less downscaling)", "INFO")
     
     # Matching settings - GPU accelerated, configurable based on detail level
     # Higher max_ratio = more matches kept (less strict filtering)
@@ -587,10 +596,10 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             match_cmd += ' --SequentialMatching.overlap 30 --SequentialMatching.quadratic_overlap 1 --SequentialMatching.loop_detection 0'
             log_progress("[MATCH] Sequential matching (extended overlap, no loop detection)", "INFO")
     
-    # Expert mode: add guided matching
-    if settings.get('expert', False) and settings.get('guided_matching', False):
+    # HQ presets: guided matching (re-check matches against epipolar geometry → more inliers)
+    if hq:
         match_cmd += ' --FeatureMatching.guided_matching 1'
-        log_progress("[EXPERT] Guided matching: ENABLED", "INFO")
+        log_progress("[HQ] Guided matching: ENABLED", "INFO")
     
     # Named commands with descriptions for better logging
     commands = [
