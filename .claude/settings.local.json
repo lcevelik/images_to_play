@@ -127,7 +127,8 @@
       "Bash(grep -v '/$')",
       "Bash(git rm *)",
       "Bash(mkdir -p docs)",
-      "Bash(rm -rf processing uploads target)"
+      "Bash(rm -rf processing uploads target)",
+      "Bash(awk 'NR==1{l=$0} NR==2{r=$0} END{print \"local: \"l\"  remote: \"r\"  -> \"\\(l==r?\"IN SYNC\":\"DIFFERS\"\\)}')"
     ],
     "additionalDirectories": [
       "f:\\Codebase\\images_to_play\\.claude"
