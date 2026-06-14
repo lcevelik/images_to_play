@@ -253,6 +253,10 @@ def transition_stage(processing_status, job_id, new_stage):
     """Transition to a new pipeline stage, recording elapsed time for the previous one."""
     ps = processing_status[job_id]
     old_stage = ps.get('stage')
+    # Already in this stage — do NOT reset its timer (the same stage emits many log
+    # lines; re-entering would keep restarting the clock and leave it near 0s).
+    if new_stage == old_stage:
+        return
     now = time.time()
     # Close out the old stage
     if old_stage and old_stage in ps.get('stages', {}):
@@ -631,8 +635,6 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 _bump('feature_matching', 8)
             elif "STEP 3" in message or "Mapper" in message or "Reconstructing" in message or "triangulating" in message.lower():
                 _bump('mapping', 12)
-            elif "STEP 4" in message or "PatchMatch" in message or "MVS" in message or "dense" in message.lower():
-                _bump('dense_mvs', 25)
             # Update status step with latest progress message
             if "Step" in message or "Processing" in message or "Matching" in message or "Registered" in message:
                 processing_status[job_id]['step'] = message.replace("=", "").strip()

@@ -188,26 +188,40 @@ def build_alignment_json(sparse_dir, output_json, max_points=150_000):
         idx = np.random.choice(len(xyz), max_points, replace=False)
         xyz, rgb = xyz[idx], rgb[idx]
 
-    extent = float(np.linalg.norm(xyz.max(0) - xyz.min(0))) if len(xyz) else 1.0
-    extent = extent or 1.0
-    depth = extent * 0.035
-
     frustums, n_cams = [], 0
     cams_path = os.path.join(sparse_dir, 'cameras.bin')
     imgs_path = os.path.join(sparse_dir, 'images.bin')
     if os.path.exists(cams_path) and os.path.exists(imgs_path):
         cams = _read_cameras_bin(cams_path)
-        for im in _read_images_bin(imgs_path):
+        images = _read_images_bin(imgs_path)
+
+        # Camera centers, used to size the frustums relative to the CAMERA spread
+        # (robust to scattered point-cloud outliers, which would otherwise make the
+        # frustums huge). Each frustum is a small fraction of the camera arrangement.
+        centers = []
+        for im in images:
+            centers.append(-_qvec2rotmat(im['qvec']).T @ im['tvec'])
+        if centers:
+            ca = np.array(centers)
+            cam_extent = float(np.linalg.norm(ca.max(0) - ca.min(0)))
+        else:
+            cam_extent = 1.0
+        depth = max(cam_extent * 0.045, 1e-4)   # small, distinguishable camera icons
+
+        for im in images:
             cam = cams.get(im['cam_id'])
             if not cam:
                 continue
-            R = _qvec2rotmat(im['qvec']); Rt = R.T
+            R = _qvec2rotmat(im['qvec']); Rt = R.T   # Rt = camera-to-world; +Z is the view direction
             C = -Rt @ im['tvec']
             f = cam['f'] or 1.0
             W, H = cam['w'], cam['h']
+            # clamp the half-angle so wide/odd intrinsics don't blow the frustum up
+            hx = min((W / 2) / f, 0.9)
+            hy = min((H / 2) / f, 0.9)
             row = [round(float(C[0]), 5), round(float(C[1]), 5), round(float(C[2]), 5)]
-            for (px, py) in [(-W / 2, -H / 2), (W / 2, -H / 2), (W / 2, H / 2), (-W / 2, H / 2)]:
-                wc = C + Rt @ np.array([px / f * depth, py / f * depth, depth], np.float64)
+            for (sx, sy) in [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]:
+                wc = C + Rt @ np.array([sx * depth, sy * depth, depth], np.float64)
                 row += [round(float(wc[0]), 5), round(float(wc[1]), 5), round(float(wc[2]), 5)]
             frustums.append(row)
             n_cams += 1
