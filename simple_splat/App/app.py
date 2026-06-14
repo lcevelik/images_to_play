@@ -1232,6 +1232,12 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         if output_ply:
             add_log(f"Output file: {output_ply}", "INFO")
 
+        # Freeze any still-running stage's elapsed time so the UI holds it (not 0)
+        for _st in processing_status[job_id].get('stages', {}).values():
+            if _st.get('status') == 'running' and _st.get('started_at'):
+                _st['elapsed'] = time.time() - _st['started_at']
+                _st['status'] = 'complete'
+
         processing_status[job_id]['step'] = 'Processing complete!'
         processing_status[job_id]['progress'] = 100
         processing_status[job_id]['eta_seconds'] = 0
@@ -1920,11 +1926,17 @@ def get_status(job_id):
         else:
             return jsonify({'error': 'Job not found'}), 404
     
+    # Keep the running stage's elapsed current (server-side, no client clock skew)
+    _now = time.time()
+    for _st in processing_status[job_id].get('stages', {}).values():
+        if _st.get('status') == 'running' and _st.get('started_at'):
+            _st['elapsed'] = _now - _st['started_at']
+
     # Convert to JSON-serializable dict (deque can't be serialized directly)
     status = processing_status[job_id].copy()
     if 'logs' in status:
         status['logs'] = list(status['logs'])  # Convert deque to list
-    
+
     return jsonify(status)
 
 @app.route('/ply/<job_id>.ply')

@@ -1678,6 +1678,7 @@
                     document.getElementById('etaRemaining').textContent = '';
                     document.getElementById('currentActivity').textContent = 'Complete';
                     for (let i = 1; i <= 5; i++) updatePipelineStage(i, 'complete');
+                    updateStageTimings(data.stages);   // hold the final per-stage times (don't reset to 0)
                     stopElapsedTimer();
                     processBtn.disabled = selectedFiles.length === 0;
                     setTabDot('process', '');
@@ -1753,14 +1754,11 @@
             const stageKeys = ['feature_extraction', 'feature_matching', 'mapping', 'dense_mvs', 'training'];
             stageKeys.forEach((key, i) => {
                 const el = document.getElementById('stage' + (i+1) + '-time');
-                if (el && stages[key]) {
-                    const s = stages[key];
-                    if (s.status === 'complete' && s.elapsed) {
-                        el.textContent = formatElapsed(s.elapsed);
-                    } else if (s.status === 'running' && s.started_at) {
-                        const running = (Date.now() / 1000) - s.started_at;
-                        el.textContent = formatElapsed(running);
-                    }
+                const s = stages[key];
+                // The server keeps `elapsed` current for the running stage and frozen
+                // for finished ones, so any started stage holds a real time (never 0).
+                if (el && s && s.elapsed != null) {
+                    el.textContent = formatElapsed(s.elapsed);
                 }
             });
         }
