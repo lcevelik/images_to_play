@@ -577,6 +577,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             'stage': 'initialization',
             'progress': 0,
             'eta_seconds': None,  # estimated seconds remaining (set live during training)
+            'preview_ready': False,  # set True once the 3D alignment preview PLY is written
             'error': None,
             'logs': deque(maxlen=200),
             'preset': preset,
@@ -741,7 +742,19 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             raise Exception("Sparse reconstruction not found. COLMAP processing may have failed.")
         
         add_log(f"Sparse reconstruction found at: {sparse_path}", "INFO")
-        
+
+        # Build a 3D alignment preview (sparse points + camera frustums) so the
+        # Process tab can show the reconstruction the way RealityScan does.
+        # Non-fatal — a preview failure must never break the pipeline.
+        try:
+            from sparse_preview import build_alignment_preview
+            preview_ply = os.path.join(parent_dir, 'alignment_preview.ply')
+            _, _npts, _ncam = build_alignment_preview(sparse_path, preview_ply)
+            processing_status[job_id]['preview_ready'] = True
+            add_log(f"[Preview] Alignment view ready ({_npts:,} points, {_ncam} cameras)", "INFO")
+        except Exception as _pe:
+            add_log(f"[Preview] Could not build alignment preview: {_pe}", "DEBUG")
+
         # Check how many images were actually registered
         try:
             import pycolmap
@@ -1953,6 +1966,16 @@ def serve_ply(job_id):
                 print(f"Error generating PLY: {e}")
     
     return jsonify({'error': 'PLY file not found'}), 404
+
+@app.route('/preview/<job_id>.ply')
+@app.route('/preview/<job_id>')
+def serve_preview(job_id):
+    """Serve the COLMAP alignment preview (sparse points + camera frustums)."""
+    job_folder = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
+    preview = os.path.join(job_folder, 'alignment_preview.ply')
+    if os.path.exists(preview):
+        return send_file(preview, mimetype='application/octet-stream')
+    return jsonify({'error': 'preview not ready'}), 404
 
 @app.route('/download/<job_id>/<file_type>')
 def download_file(job_id, file_type):

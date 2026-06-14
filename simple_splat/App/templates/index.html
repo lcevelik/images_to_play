@@ -1105,7 +1105,15 @@
                                 </div>
                             </div>
 
-                            <div class="log-preview" id="liveLogPreview"></div>
+                            <div class="align-preview" id="alignPreviewWrap" style="position:relative; min-height:340px; border-radius:12px; overflow:hidden; background:#0a0a0a;">
+                                <iframe id="alignPreview" title="3D alignment preview" style="width:100%; height:100%; min-height:340px; border:0; display:none;"></iframe>
+                                <div class="preview-hint" id="alignPreviewHint" style="position:absolute; inset:0; display:flex; flex-direction:column; gap:8px; align-items:center; justify-content:center; text-align:center; padding:18px; color:#8a8a8a; font-size:13px;">
+                                    <div class="idle-orb"></div>
+                                    <span>Aligned cameras &amp; point cloud appear here once COLMAP finishes…</span>
+                                </div>
+                                <!-- kept hidden: logs still captured for the Logs page, just not shown here -->
+                                <div class="log-preview" id="liveLogPreview" style="display:none;"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1439,6 +1447,7 @@
             switchTab('process');
 
             resetPipelineStages();
+            resetPreview();
             processingStartTime = Date.now();
             startElapsedTimer();
 
@@ -1620,6 +1629,27 @@
             } catch (e) { /* audio blocked — ignore */ }
         }
 
+        // 3D alignment preview: once COLMAP finishes, load the sparse points +
+        // camera frustums into the embedded SuperSplat viewer (replaces the log).
+        let _previewLoaded = false;
+        function maybeLoadPreview(data) {
+            if (_previewLoaded || !data || !data.preview_ready || !currentJobId) return;
+            const frame = document.getElementById('alignPreview');
+            const hint = document.getElementById('alignPreviewHint');
+            if (!frame) return;
+            frame.src = `/static/supersplat/index.html?load=/preview/${currentJobId}.ply`;
+            frame.style.display = 'block';
+            if (hint) hint.style.display = 'none';
+            _previewLoaded = true;
+        }
+        function resetPreview() {
+            _previewLoaded = false;
+            const frame = document.getElementById('alignPreview');
+            const hint = document.getElementById('alignPreviewHint');
+            if (frame) { frame.src = 'about:blank'; frame.style.display = 'none'; }
+            if (hint) hint.style.display = 'flex';
+        }
+
         async function pollStatus() {
             if (!currentJobId) return;
 
@@ -1638,6 +1668,9 @@
                     setTabDot('process', 'err');
                     return;
                 }
+
+                // Load the 3D alignment view as soon as COLMAP has produced it
+                maybeLoadPreview(data);
 
                 if (data.status === 'completed') {
                     progressFill.style.width = '100%';
