@@ -123,7 +123,11 @@
       "Bash(rm -rf __pycache__)",
       "Bash(mkdir -p pipeline tests)",
       "Bash(cp F:/Codebase/images_to_play/simple_splat/App/app.py app.py)",
-      "Bash(cp F:/Codebase/images_to_play/simple_splat/App/pipeline/*.py pipeline/)"
+      "Bash(cp F:/Codebase/images_to_play/simple_splat/App/pipeline/*.py pipeline/)",
+      "Bash(grep -v '/$')",
+      "Bash(git rm *)",
+      "Bash(mkdir -p docs)",
+      "Bash(rm -rf processing uploads target)"
     ],
     "additionalDirectories": [
       "f:\\Codebase\\images_to_play\\.claude"
