@@ -17,7 +17,7 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## To Do
 
-- [ ] **Verify the 3D alignment preview end-to-end** (restart server + run a job; confirm SuperSplat renders the degree-0 PLY + cyan frustums look right)
+- [ ] **NEXT: verify the alignment viewer on REAL COLMAP data** — run a job, confirm the scene is upright (auto-level), frustums are small + point the right way, Feature Matching shows a real time, no Dense MVS row. (Viewer verified with synthetic data; real-data end-to-end still untested.) Offer an "always vertical" / manual flip control if orientation is off.
 - [ ] **Preview Phase 3** — slider to scrub training checkpoints (`export_<iter>.ply`) and watch the splat densify from the sparse cloud
 - [ ] **Run HQ COLMAP on the 74 photos**, compare sparse-point count vs 31,373 (old) and RealityScan 53,612 — did #1–4 close the gap?
 - [ ] **`rs_to_colmap.py` converter** (transforms.json → pinhole COLMAP + undistorted images) so MCMC can train RealityScan poses → then the 4-way A/B (brush/mcmc × colmap/realityscan, named clearly)
@@ -33,6 +33,10 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## Done
 
+- [x] 2026-06-14 — **Three.js alignment viewer** (`static/align/viewer.html`): grid + point cloud + clean wireframe camera frustums, **auto-leveled** to camera up-vector, sized to camera spread; replaces the confusing SuperSplat-dots version. `build_alignment_json` + `/align/<job>.json`
+- [x] 2026-06-14 — **Repo reorganized**: `App/pipeline/` package + `tests/` + root `docs/`; removed 23 scratch scripts; freed 62 GB; **Lite dist repackaged + boot-verified**
+- [x] 2026-06-14 — **Stage timers fixed** (re-trigger no longer resets the clock; Feature Matching now shows real time), **Dense MVS row removed**, Process tab **full-width + responsive** (stacks vertically on portrait); fixed `/align` HTTP 500 (abspath)
+- [x] 2026-06-14 — Per-stage elapsed times hold final value on completion (server-computed, no client clock skew)
 - [x] 2026-06-14 — 3D alignment preview in Process tab: `sparse_preview.py` writes sparse points + camera frustums as tiny Gaussians (pure-binary COLMAP parse, **no pycolmap** — bundled Python lacks it) → embedded SuperSplat, replaces the log panel. `/preview/<job_id>.ply` route + `preview_ready` status flag
 - [x] 2026-06-14 — COLMAP HQ flags for high/quality/expert (`hq` gate): affine-shape SIFT + domain-size pooling, raised max_image_size, guided matching, BA refine principal point
 - [x] 2026-06-14 — MCMC verified on real hardware (Quadro RTX 8000 48 GB, torch 2.12+cu126 at C:\Program Files\Python314); auto-cap confirmed (4M overfits a 74-photo scene → haze)
