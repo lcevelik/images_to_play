@@ -1,5 +1,16 @@
 # FonixFlow Splat — Full Edition Build Plan
 
+> **Status (2026-06-13):** A first cut is implemented as `build_lite_package.py --with-mcmc`
+> — it downloads torch (cu126) + a **prebuilt** gsplat wheel + MCMC deps into `App/wheels/`,
+> so the bundled Python runs MCMC and the normal `START_SERVER.bat` works (no separate
+> launcher needed). `--only-binary :all:` makes the build fail loudly if gsplat has no
+> prebuilt wheel for the bundled Python (then pin Python 3.10 per the section below).
+> **MCMC is NVIDIA-only** even when bundled (gsplat is CUDA); torch's wheel carries the
+> CUDA runtime so targets need only a recent NVIDIA driver. Still TODO: verify the build
+> end-to-end on a clean machine and the Inno Setup installer. For a machine that already
+> has torch (like the dev box), `START_SERVER_MCMC.bat` runs the app under the system
+> CUDA Python with no rebuild.
+
 ## What "Full" adds over Lite
 
 | Feature | Lite | Full |

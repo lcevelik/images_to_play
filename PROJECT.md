@@ -27,6 +27,10 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## Done
 
+- [x] 2026-06-13 — Full/MCMC packaging: `build_lite_package.py --with-mcmc` (bundles torch+gsplat, NVIDIA-only) + `START_SERVER_MCMC.bat` (runs app under system CUDA Python)
+- [x] 2026-06-13 — Brush v0.3.0 hardening: numbered `export_{iter}.ply` checkpoints, filesystem progress + ETA, timeout salvage, removed invalid `--with-viewer false`
+- [x] 2026-06-13 — Desktop notification + beep on job completion
+- [x] 2026-06-13 — Deep audit: 8 app.py bugs fixed (74→15 photo sampling, ZIP flatten, preset-downgrade sentinels, PLY validation) + `GlobalMapper.*` preset params wired (presets were producing identical reconstructions)
 - [x] 2026-06-13 — Auto MCMC Gaussian cap scaled to sparse-point count (omit --cap-max = scene-aware, range 0.5M–2M)
 - [x] 2026-06-13 — MCMC 4M Gaussians trained (1h37m RTX 8000), uploaded to splat.steadiczech.com as comparison sample
 - [x] 2026-06-13 — Brush 50k-steps run completed and uploaded to splat.steadiczech.com for Brush vs MCMC comparison

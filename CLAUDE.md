@@ -96,7 +96,14 @@ When `--cap-max` is omitted, the trainer auto-scales the Gaussian cap to the spa
 - The app (`app.py`) also uses auto by default (no more hardcoded 1M)
 - Explicit `--cap-max N` still works for manual control
 
-### External binaries
+### Brush trainer (v0.3.0 specifics)
+
+The bundled `brush_app.exe` is **Brush v0.3.0** (ArthurBrussee/brush). Hard-won facts:
+- It is a **GUI-subsystem binary** — it writes **nothing to a parent stdout pipe**, so step progress cannot be parsed from stdout. Progress is tracked from the **`export_<iter>.ply` checkpoint files on disk** instead, and the ETA is computed from the measured export rate.
+- **`--with-viewer` is a presence flag, not a value flag.** `--with-viewer false` is REJECTED (`unexpected argument 'false'`). The v0.3.0 source auto-disables the viewer when a source path is present, but the bundled build still opens a window — do **not** pass `--with-viewer false`.
+- **`--export-name` supports an `{iter}` token** → use `export_{iter}.ply` so each periodic export is numbered and the real step is readable (a fixed name overwrites one unnumbered file).
+- The app exports **periodically** (`--export-every = steps//10`) so a timeout/crash still leaves a usable splat; on timeout it **salvages the most-progressed `export_<iter>.ply`** instead of reporting total failure.
+
 ### External binaries
 
 | Binary | Location | Required |
@@ -180,6 +187,16 @@ Model checkpoint (~500MB) auto-downloads to `~/.cache/torch/hub/checkpoints/` on
 
 ---
 
+## Packaging (distributable builds)
+
+`packaging/build_lite_package.py` produces a self-contained Windows bundle in `packaging/dist/`.
+
+- **Lite** (default, ~1.3 GB): bundled **Python 3.11 embed + COLMAP + Brush + offline wheels**. Brush-only — the embedded Python has **no torch**, so selecting MCMC import-fails and falls back to Brush. Launch: `START_SERVER.bat`.
+- **Full / MCMC** (`--with-mcmc`, ~4 GB): also downloads **torch (cu126) + gsplat (prebuilt wheel) + MCMC deps** into `App/wheels/`, so the bundled Python runs MCMC natively. `--only-binary :all:` makes the build **fail loudly** if gsplat has no prebuilt wheel for the chosen Python (fix: pin Python 3.10). **MCMC is NVIDIA-only** — even bundled it will not run on AMD/Intel/Mac (gsplat is CUDA). torch's wheel carries the CUDA runtime, so targets need only a recent NVIDIA driver, not the CUDA toolkit.
+- **`START_SERVER_MCMC.bat`** (written into the Lite bundle): runs the same app on port 5000 but with the **system CUDA Python** (`C:\Program Files\Python314\python.exe`, torch 2.12.0+cu126), so MCMC works without rebuilding — for a machine that already has torch+gsplat.
+
+---
+
 ## Improvement Roadmap
 
 Derived from analysis of LichtFeld-Studio and the current pipeline's bottlenecks. Phases 1-4 implemented 2026-05-25.
@@ -240,7 +257,7 @@ Trainer selector in UI: "Brush" (default) / "gsplat MCMC". Branches in `process_
 | high    | 200K–2M     | 1M–10M          | up to cap |
 | quality / expert | 500K–5M | 2M–30M     | up to cap |
 
-MCMC always converges to `mcmc_cap` (default 1,000,000, `config.get('mcmc_cap')` in app.py — no UI knob yet). On the RTX 8000 (48 GB) the cap can safely go to 2–4M.
+MCMC converges to `cap_max`. When omitted it **auto-scales** to `sparse_pts × 30` clamped to **500k–2M** (`gsplat_mcmc_trainer.py`); app.py passes `config.get('mcmc_cap')` (None → auto). Explicit values still work; on the RTX 8000 (48 GB) the cap can safely go to 2–4M. No UI knob yet (PROJECT.md TODO). Note: the cap is a **ceiling, not a target** — MCMC fills toward it gradually, so a high cap needs enough steps (this 74-photo scene reaches its ~940k auto-cap; 4M only filled by step ~10.5k of a 50k run).
 
 **Dense MVS:** all presets ship `dense: false` (MVS adds nothing for splat training). If enabled via `enable_dense`, with the RTX 8000 the `patch_match_stereo` cache can be raised to 44GB (`--PatchMatchStereo.cache_size 44`) and `fusion_min_pixels` lowered to 1 for maximum density.
 
@@ -257,5 +274,7 @@ MCMC always converges to `mcmc_cap` (default 1,000,000, `config.get('mcmc_cap')`
 **2026-06-12 — MCMC trainer fixed and verified.** The trainer had been broken since inception: (1) c2w passed where gsplat expects w2c, (2) optimizers built over dead tensor copies (`grad=None`, silent no-op), (3) hand-rolled avg-pool SSIM with corrupt border gradients, (4) `export_splats` given activated values where the PLY format stores raw log/logit (splat rendered as giant blobs in viewers). All fixed; hyperparameters aligned to gsplat's reference trainer; LPIPS computed on a 512px crop. Verified: synthetic smoke test 13.4 → 39 dB PSNR, real 74-photo job 25.5 dB mean PSNR, 1M Gaussians, ~13 min training.
 
 **2026-06-12 — GUI redesigned + rebrand.** App renamed **FonixFlow Splat** (directory name `simple_splat/` intentionally unchanged). UI is now tabbed (Create / Settings / Process / Results), no scrolling, auto-switches tabs as the job advances. All element IDs the JS depends on were preserved. Dev preview config in `.claude/launch.json` (name `fonixflow-splat`, port 5000, `autoPort: false` because app.py hardcodes the port).
+
+**2026-06-13 — Deep audit, Brush v0.3.0 hardening, MCMC auto-cap, Full packaging.** Fixed 8 `app.py` bugs (image-count sampling that dropped 74→15 photos, ZIP nested-folder flatten, preset-downgrade `None` sentinels, Brush PLY size validation, filename collision dedup). Wired `GlobalMapper.*` preset params in `run_glomap.py` (every preset had been producing identical reconstructions). Brush: periodic **numbered** exports (`export_{iter}.ply`), **filesystem** progress + measured-rate ETA, **timeout salvage**; removed invalid `--with-viewer false`. Added a desktop **notification + beep** on job completion (`index.html`). MCMC `cap_max` now **auto-scales** to sparse-point count. `build_lite_package.py --with-mcmc` bundles torch+gsplat (**Full**, NVIDIA-only, ~4 GB); `START_SERVER_MCMC.bat` runs the app under the system CUDA Python. Verified live: MCMC on the real 74-photo scene grew 31k→437k Gaussians (7k steps) and filled a 4M cap by step ~10.5k.
 
 **Known next steps** (see PROJECT.md): expose `mcmc_cap` in UI, antialiased rasterization + bilateral grid options, VGGT/MASt3R fallback when COLMAP fails, Brush-vs-MCMC benchmark on identical input.

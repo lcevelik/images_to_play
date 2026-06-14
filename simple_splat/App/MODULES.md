@@ -323,7 +323,7 @@ Low-level PLY writer. Writes an ASCII PLY file from a list of `[x, y, z]` points
 - Loss: `0.8·L1 + 0.2·SSIM` (pytorch-msssim) `+ 0.01·opacity_reg + 0.01·scale_reg` (regs drive MCMC relocation) `+ 0.05·LPIPS` on a random 512px crop (if enabled)
 - SH degree warmup: one band per 1000 steps
 - `SelectiveAdam` with packed-mode visibility masks from `info["gaussian_ids"]`
-- `MCMCStrategy(cap_max, refine 500 → 85% of steps, every 100)`
+- `MCMCStrategy(cap_max, refine 500 → 85% of steps, every 100)`. `cap_max=None`/omitted **auto-scales** to `sparse_pts × 30` clamped 500k–2M — a ceiling, not a target (fills gradually as steps progress). MCMC is **NVIDIA/CUDA only**.
 
 ### Conventions that MUST hold (each was a past bug)
 
@@ -396,7 +396,10 @@ Thread: process_images_async()
       mcmc  → gsplat_mcmc_trainer.train_mcmc(parent_dir, ...)  in-process
               └─ falls back to Brush on any exception
       brush → brush_app.exe <parent_dir> --total-steps N --export-path <parent_dir>
-              └─ stdout streamed for live step progress
+                --export-name export_{iter}.ply --export-every steps//10
+              └─ Brush v0.3.0 is a GUI binary (no usable stdout); progress + ETA come
+                 from the numbered export_<iter>.ply checkpoints on disk. On timeout
+                 the most-progressed checkpoint is salvaged instead of failing.
       │
       └─ Trains Gaussian splat → gaussian_splat.ply
 

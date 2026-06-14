@@ -22,7 +22,7 @@ This is a **fully standalone package** — Python, COLMAP, Brush, all Python dep
 - **Video Frame Extraction**: Automatically extracts frames from video at configurable intervals
 - **5 Quality Presets**: Fast (5K steps), Balanced (15K), High (30K), Quality (60K), Expert (100K)
 - **Quality Scale**: Draft (0.3×) / Standard (1×) / Cinematic (2×) multiplier on training steps
-- **Two Trainers**: Brush (standard 3DGS, default) or gsplat MCMC (1M Gaussian cap, LPIPS loss, often higher quality)
+- **Two Trainers**: Brush (standard 3DGS, default) or gsplat MCMC (auto Gaussian cap that scales to the scene, LPIPS loss, often higher quality — NVIDIA only)
 - **Dense Reconstruction**: Optional COLMAP MVS for millions of points (off by default; toggle via upload form)
 - **Camera Tracking Export**: FBX / GLTF / JSON / Blender script camera paths from the results panel
 - **Browser Viewer**: PlayCanvas SuperSplat (WebGPU-accelerated, no install needed)
@@ -65,7 +65,7 @@ The 3D viewer requires WebGPU. Use Chrome or Edge 113+. You can verify at `chrom
         |
 6. Gaussian Splat Training (user choice)
    - Brush: standard 3DGS clone/split densification
-   - gsplat MCMC: stochastic relocation, 1M Gaussian cap, LPIPS loss
+   - gsplat MCMC: stochastic relocation, auto Gaussian cap (scales to sparse points), LPIPS loss (NVIDIA only)
    - Exports gaussian_splat.ply
         |
 7. View in Browser (PlayCanvas SuperSplat, WebGPU)

@@ -171,10 +171,12 @@ pip install lpips   # optional perceptual loss
 ```
 
 Requirements and gotchas:
-- **CUDA GPU required** — there is no CPU path for the MCMC trainer
+- **CUDA GPU required** — there is no CPU path for the MCMC trainer (NVIDIA only)
 - **torch must be the CUDA build** (`+cu126`). A `+cpu` torch fails silently into the Brush fallback
 - **gsplat JIT-compiles its CUDA kernels on first use** — MSVC `cl.exe` and the CUDA toolkit (nvcc) must be available. `app.py` auto-discovers Visual Studio's `cl.exe` at startup and adds it to PATH. The first training run triggers a ~10 minute one-time kernel compile; later runs start instantly
 - If any of this is missing, MCMC jobs log a warning and **fall back to Brush automatically** — the job still completes
+- **Gaussian cap is automatic** — omit `--cap-max` and the trainer scales it to the scene (`sparse_pts × 30`, clamped 0.5M–2M). Pass an explicit `--cap-max N` to override
+- **Lite bundle note:** the bundled Python (3.11) has no torch, so MCMC there always falls back to Brush. To run MCMC from the bundle, either rebuild with `build_lite_package.py --with-mcmc`, or use `START_SERVER_MCMC.bat`, which launches the app under a system CUDA Python that already has torch+gsplat
 
 Verify the trainer end-to-end with the smoke test (trains a synthetic scene, ~2 min):
 ```bash
