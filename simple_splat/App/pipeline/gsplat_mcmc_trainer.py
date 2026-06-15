@@ -116,7 +116,8 @@ def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
 
 
 def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
-               sh_degree=3, use_lpips=False, progress_callback=None, output_ply_path=None):
+               sh_degree=3, use_lpips=False, progress_callback=None, output_ply_path=None,
+               strategy_name='mcmc'):
     """Train Gaussian Splat using gsplat MCMCStrategy.
 
     Args:
@@ -134,7 +135,7 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
     import torch
     import torch.nn.functional as F
     from gsplat import rasterization
-    from gsplat.strategy import MCMCStrategy
+    from gsplat.strategy import MCMCStrategy, DefaultStrategy
     from gsplat.optimizers import SelectiveAdam
 
     def log(msg, level="INFO"):
@@ -159,12 +160,26 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
     # guess. Sparse-point count is a better signal than photo count (it folds in
     # both coverage AND texture). ~30x sparse points, clamped to a sane range so a
     # tiny scene still gets enough and a huge one doesn't blow up VRAM / PLY size.
+    # GPU ceiling: never let the cap exceed what VRAM can hold during training.
+    # ~1.5 KB/Gaussian persistent (params + Adam moments + grads) at SH deg 3;
+    # 0.7 safety leaves room for per-frame render buffers. On the 48 GB RTX 8000
+    # this lands ~8M, so the scene multiplier (below) is the real limiter, not VRAM.
+    try:
+        free_vram, _ = torch.cuda.mem_get_info(device)
+        gpu_ceiling = int(min(8_000_000, free_vram * 0.7 / 1500))
+    except Exception:
+        gpu_ceiling = 8_000_000
+
     if cap_max is None or cap_max == 'auto':
-        cap_max = int(min(2_000_000, max(500_000, num_sparse * 30)))
-        log(f"Auto cap_max = {cap_max:,} ({num_sparse:,} sparse pts x30, clamped 0.5M-2M)")
+        # Scene-driven: sparse-point count folds in both coverage AND texture.
+        # Clamp low so tiny scenes still get enough; clamp high by the GPU ceiling
+        # so a huge scene can't OOM. NOTE: ADC mode ignores this entirely (it grows
+        # organically, no cap) — this only bounds the MCMC strategy.
+        cap_max = int(min(gpu_ceiling, max(500_000, num_sparse * 30)))
+        log(f"Auto cap_max = {cap_max:,} ({num_sparse:,} sparse x30, GPU ceiling {gpu_ceiling:,})")
     else:
-        cap_max = int(cap_max)
-        log(f"cap_max = {cap_max:,} (explicit)")
+        cap_max = int(min(int(cap_max), gpu_ceiling))
+        log(f"cap_max = {cap_max:,} (explicit, GPU ceiling {gpu_ceiling:,})")
 
     # Scene scale from camera centers (gsplat Parser convention):
     # max distance of any camera from the average camera position, * 1.1
@@ -194,16 +209,36 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
         optimizers['means'], gamma=0.01 ** (1.0 / total_steps)
     )
 
-    strategy = MCMCStrategy(
-        cap_max=cap_max,
-        refine_start_iter=500,
-        refine_stop_iter=int(total_steps * 0.85),  # reference ratio: 25K of 30K
-        refine_every=100,
-        min_opacity=0.005,
-        verbose=False,
-    )
+    is_adc = str(strategy_name).lower() in ('adc', 'default')
+    if is_adc:
+        # INRIA-style adaptive density control: clone/split Gaussians where the
+        # view-space gradient says detail is missing, prune transparent ones.
+        # No cap — grows organically to what the scene needs (the Postshot path).
+        refine_stop = int(total_steps * 0.5)
+        strategy = DefaultStrategy(
+            refine_start_iter=500,
+            refine_stop_iter=refine_stop,
+            refine_every=100,
+            reset_every=3000,
+            grow_grad2d=0.0002,
+            grow_scale3d=0.01,
+            prune_opa=0.005,
+            verbose=False,
+        )
+        strategy_state = strategy.initialize_state(scene_scale=scene_scale)
+        log(f"Strategy: ADC (adaptive densification) — organic growth, no cap; densify until step {refine_stop}")
+    else:
+        strategy = MCMCStrategy(
+            cap_max=cap_max,
+            refine_start_iter=500,
+            refine_stop_iter=int(total_steps * 0.85),  # reference ratio: 25K of 30K
+            refine_every=100,
+            min_opacity=0.005,
+            verbose=False,
+        )
+        strategy_state = strategy.initialize_state()
+        log(f"Strategy: MCMC — fills toward cap {cap_max:,}")
     strategy.check_sanity(param_dict, optimizers)
-    strategy_state = strategy.initialize_state()
 
     # Gaussian-windowed SSIM (pytorch_msssim). A naive avg_pool SSIM has biased
     # border statistics and negative variances whose gradients wreck training —
@@ -234,7 +269,7 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
     # so relocation has dead Gaussians to teleport (3DGS-MCMC paper, Eq. 12)
     opacity_reg, scale_reg = 0.01, 0.01
 
-    log(f"Starting MCMC training: {total_steps} steps, cap={cap_max:,}, lpips={'on' if lpips_fn else 'off'}")
+    log(f"Starting {'ADC' if is_adc else 'MCMC'} training: {total_steps} steps, lpips={'on' if lpips_fn else 'off'}")
 
     for step in range(total_steps):
         idx = np.random.randint(num_images)
@@ -268,8 +303,11 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
             loss = 0.8 * F.l1_loss(pred, gt) + 0.2 * ssim_loss(pred, gt)
         else:
             loss = F.l1_loss(pred, gt)
-        loss = loss + opacity_reg * torch.sigmoid(param_dict['opacities']).abs().mean()
-        loss = loss + scale_reg * torch.exp(param_dict['scales']).abs().mean()
+        # Opacity/scale L1 only for MCMC — they create the dead Gaussians MCMC
+        # relocates. ADC prunes on its own, so the regularizers would just fade detail.
+        if not is_adc:
+            loss = loss + opacity_reg * torch.sigmoid(param_dict['opacities']).abs().mean()
+            loss = loss + scale_reg * torch.exp(param_dict['scales']).abs().mean()
 
         if lpips_fn is not None:
             # LPIPS on a random 512px crop — full-res VGG backward at 3200px+
@@ -282,6 +320,11 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
             p_lp = (p_c.clamp(0, 1) * 2 - 1).permute(2, 0, 1).unsqueeze(0)
             g_lp = (g_c.clamp(0, 1) * 2 - 1).permute(2, 0, 1).unsqueeze(0)
             loss = loss + 0.05 * lpips_fn(p_lp, g_lp).mean()
+
+        # ADC reads the means2d gradient to decide where to densify — it must
+        # retain that grad before backward.
+        if is_adc:
+            strategy.step_pre_backward(param_dict, optimizers, strategy_state, step, info)
 
         loss.backward()
 
@@ -300,16 +343,22 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
             opt.zero_grad(set_to_none=True)
         means_scheduler.step()
 
-        # Relocation + noise injection; lr couples noise magnitude to means lr
-        strategy.step_post_backward(param_dict, optimizers, strategy_state, step, info,
-                                    lr=means_scheduler.get_last_lr()[0])
+        if is_adc:
+            # Clone/split/prune. packed flag must match rasterization's mode.
+            packed = info.get("gaussian_ids") is not None
+            strategy.step_post_backward(param_dict, optimizers, strategy_state, step, info,
+                                        packed=packed)
+        else:
+            # Relocation + noise injection; lr couples noise magnitude to means lr
+            strategy.step_post_backward(param_dict, optimizers, strategy_state, step, info,
+                                        lr=means_scheduler.get_last_lr()[0])
 
         if step % 500 == 0 or step == total_steps - 1:
             n = param_dict['means'].shape[0]
             with torch.no_grad():
                 mse = F.mse_loss(pred.clamp(0, 1), gt)
                 psnr = -10.0 * torch.log10(mse + 1e-10)
-            log(f"[MCMC] Step {step}/{total_steps} | loss={loss.item():.4f} | psnr={psnr.item():.2f} | gaussians={n:,}")
+            log(f"[{'ADC' if is_adc else 'MCMC'}] Step {step}/{total_steps} | loss={loss.item():.4f} | psnr={psnr.item():.2f} | gaussians={n:,}")
 
     if output_ply_path is None:
         output_ply_path = os.path.join(parent_dir, "gaussian_splat.ply")
@@ -394,7 +443,10 @@ if __name__ == "__main__":
     parser.add_argument("--output", "-o")
     parser.add_argument("--steps", type=int, default=15000)
     parser.add_argument("--cap-max", type=int, default=None,
-                        help="Gaussian cap; omit for auto (scales to sparse-point count)")
+                        help="Gaussian cap (MCMC only); omit for auto (scales to sparse-point count)")
+    parser.add_argument("--strategy", choices=["mcmc", "adc"], default="mcmc",
+                        help="mcmc = fixed cap; adc = adaptive densification, grows organically (no cap)")
     args = parser.parse_args()
-    result = train_mcmc(args.input, total_steps=args.steps, cap_max=args.cap_max, output_ply_path=args.output)
+    result = train_mcmc(args.input, total_steps=args.steps, cap_max=args.cap_max,
+                        output_ply_path=args.output, strategy_name=args.strategy)
     print("Success:" if result else "Failed:", result)

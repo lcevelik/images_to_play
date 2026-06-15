@@ -22,8 +22,7 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 - [ ] **Run HQ COLMAP on the 74 photos**, compare sparse-point count vs 31,373 (old) and RealityScan 53,612 — did #1–4 close the gap?
 - [ ] **`rs_to_colmap.py` converter** (transforms.json → pinhole COLMAP + undistorted images) so MCMC can train RealityScan poses → then the 4-way A/B (brush/mcmc × colmap/realityscan, named clearly)
 - [ ] **Learning-based matcher** (LightGlue / MASt3R-SfM / VGGT) as a COLMAP front-end — the real gap-closer to RealityScan on textureless surfaces
-- [ ] **MCMC ADC mode** (gsplat `DefaultStrategy`, INRIA-style adaptive densification) — may look cleaner than MCMC for this content
-- [ ] Expose `mcmc_cap` in Settings UI (auto by default; RTX 8000 handles 2–4M — biggest quality lever for detailed scenes)
+- [ ] **TEST ADC vs Postshot** — run the new MCMC ADC trainer on the dataset behind `3698a389.ply` (Postshot, 4.37M splats) at 30k steps; our Brush 15k gave only 110,932. Compare Gaussian count + visual quality. ADC should grow organically toward millions (no cap).
 - [ ] Head-to-head benchmark: Brush vs MCMC on the same 74-photo capture, same steps, PSNR on held views (samples uploaded to gallery)
 - [ ] gsplat quality flags: `rasterize_mode="antialiased"` (check SuperSplat compat) and bilateral grid for auto-exposure captures
 - [ ] VGGT / MASt3R-SfM fallback when COLMAP registration fails (write COLMAP-format output, continue pipeline)
@@ -33,6 +32,7 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## Done
 
+- [x] 2026-06-15 — **MCMC ADC mode + GPU-aware cap + Gaussian-budget UI**: `gsplat_mcmc_trainer.py` now takes `strategy_name='mcmc'|'adc'` — ADC uses `DefaultStrategy` (organic clone/split/prune, no cap, MCMC regularizers off, `step_pre_backward`+`step_post_backward`). Auto-cap is now GPU-bounded (`mem_get_info`, ~8M ceiling on the 48GB card) instead of a flat 2M. UI: third trainer card **MCMC ADC** + **Gaussian Budget** select (auto/1M/2M/4M/8M) → `gaussian_budget` form field → `mcmc_cap`. Verified: server boots, controls render (3 cards + select), no console errors. **Training math untested — needs a real CUDA run.**
 - [x] 2026-06-14 — **Three.js alignment viewer** (`static/align/viewer.html`): grid + point cloud + clean wireframe camera frustums, **auto-leveled** to camera up-vector, sized to camera spread; replaces the confusing SuperSplat-dots version. `build_alignment_json` + `/align/<job>.json`
 - [x] 2026-06-14 — **Repo reorganized**: `App/pipeline/` package + `tests/` + root `docs/`; removed 23 scratch scripts; freed 62 GB; **Lite dist repackaged + boot-verified**
 - [x] 2026-06-14 — **Stage timers fixed** (re-trigger no longer resets the clock; Feature Matching now shows real time), **Dense MVS row removed**, Process tab **full-width + responsive** (stacks vertically on portrait); fixed `/align` HTTP 500 (abspath)

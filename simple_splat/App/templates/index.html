@@ -979,7 +979,7 @@
                     <div class="settings-cols">
                         <div class="set-group">
                             <div class="set-label">Trainer</div>
-                            <div class="opt-grid c2">
+                            <div class="opt-grid c3">
                                 <label class="preset-option">
                                     <input type="radio" name="trainer" value="brush" checked>
                                     <span class="po-name"><span class="tint blue"></span>Brush</span>
@@ -988,9 +988,26 @@
                                 <label class="preset-option">
                                     <input type="radio" name="trainer" value="mcmc">
                                     <span class="po-name"><span class="tint violet"></span>MCMC</span>
-                                    <span class="po-desc">1M Gaussian cap — often higher quality</span>
+                                    <span class="po-desc">Scene-scaled cap — fills to a target</span>
+                                </label>
+                                <label class="preset-option">
+                                    <input type="radio" name="trainer" value="mcmc_adc">
+                                    <span class="po-name"><span class="tint amber"></span>MCMC ADC</span>
+                                    <span class="po-desc">Adaptive densify, no cap — matches Postshot</span>
                                 </label>
                             </div>
+                        </div>
+
+                        <div class="set-group">
+                            <div class="set-label">Gaussian Budget <span style="opacity:.6;font-weight:400">(MCMC cap)</span></div>
+                            <select id="gaussianBudget">
+                                <option value="auto" selected>Auto — scene-scaled (recommended)</option>
+                                <option value="1000000">1M Gaussians</option>
+                                <option value="2000000">2M Gaussians</option>
+                                <option value="4000000">4M Gaussians</option>
+                                <option value="8000000">8M — max (RTX 8000 48GB)</option>
+                            </select>
+                            <div class="po-desc" style="margin-top:6px">Ignored by ADC (grows organically). Higher = more detail, but risks haze on a small scene.</div>
                         </div>
 
                         <div class="set-group">
@@ -1495,6 +1512,8 @@
                 formData.append('quality_scale', document.getElementById('qualityScale').value);
                 const trainerRadio = document.querySelector('input[name="trainer"]:checked');
                 formData.append('trainer', trainerRadio ? trainerRadio.value : 'brush');
+                const budgetEl = document.getElementById('gaussianBudget');
+                formData.append('gaussian_budget', budgetEl ? budgetEl.value : 'auto');
                 formData.append('matcher_type', 'auto');
                 formData.append('enable_dense', 'false');
                 formData.append('mvs_quality_mode', 'balanced');

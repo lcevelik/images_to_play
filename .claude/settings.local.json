@@ -156,7 +156,15 @@
       "Bash(mkdir -p processing/_vtest)",
       "Bash(rm -rf processing/_vtest)",
       "Bash(cp simple_splat/App/app.py packaging/dist/FonixFlowSplat_Lite_v0.1.0/App/app.py)",
-      "Bash(cp simple_splat/App/templates/index.html packaging/dist/FonixFlowSplat_Lite_v0.1.0/App/templates/index.html)"
+      "Bash(cp simple_splat/App/templates/index.html packaging/dist/FonixFlowSplat_Lite_v0.1.0/App/templates/index.html)",
+      "Bash(powershell -Command \"Get-Process python,pythonw,brush_app,brush,colmap -ErrorAction SilentlyContinue | Stop-Process -Force\")",
+      "Bash(rm -rf simple_splat/App/processing/* simple_splat/App/uploads/* simple_splat/App/job_status/* packaging/dist/FonixFlowSplat_Lite_v0.1.0/App/processing/* packaging/dist/FonixFlowSplat_Lite_v0.1.0/App/uploads/* processing)",
+      "Bash(touch simple_splat/App/processing/.gitkeep packaging/dist/FonixFlowSplat_Lite_v0.1.0/App/processing/.gitkeep)",
+      "Bash(powershell -Command \"Get-Process python,brush_app -ErrorAction SilentlyContinue | Select-Object Id,ProcessName\")",
+      "Bash(\"/c/Program Files/Python314/python.exe\" -m py_compile pipeline/gsplat_mcmc_trainer.py)",
+      "Bash(\"/c/Program Files/Python314/python.exe\" -m py_compile app.py)",
+      "Bash(\"/c/Program Files/Python314/python.exe\" app.py)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:5000/)"
     ],
     "additionalDirectories": [
       "f:\\Codebase\\images_to_play\\.claude"

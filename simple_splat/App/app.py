@@ -872,15 +872,19 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         trainer_used = None  # which trainer actually produced the output
 
         # --- MCMC branch ---
-        if trainer_choice == 'mcmc' and not ply_generated:
-            add_log("Using gsplat MCMC trainer (explicit Gaussian cap, stochastic relocation)", "INFO")
+        if trainer_choice in ('mcmc', 'mcmc_adc') and not ply_generated:
+            mcmc_strategy = 'adc' if trainer_choice == 'mcmc_adc' else 'mcmc'
+            if mcmc_strategy == 'adc':
+                add_log("Using gsplat ADC trainer (adaptive densification — grows organically, no cap)", "INFO")
+            else:
+                add_log("Using gsplat MCMC trainer (explicit Gaussian cap, stochastic relocation)", "INFO")
             try:
                 from pipeline.gsplat_mcmc_trainer import train_mcmc
                 mcmc_output = os.path.join(parent_dir, 'gaussian_splat.ply')
                 mcmc_train_start = time.time()
 
                 def mcmc_log(msg, level="INFO"):
-                    add_log(f"[MCMC] {msg}", level)
+                    add_log(f"[{mcmc_strategy.upper()}] {msg}", level)
                     step_match = re.search(r'Step (\d+)/(\d+)', msg)
                     if step_match:
                         s, total = int(step_match.group(1)), int(step_match.group(2))
@@ -891,7 +895,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                         eta = int((total - s) / (s / el)) if s > 0 and el > 0 else None
                         processing_status[job_id]['eta_seconds'] = eta
                         eta_str = f", ~{eta // 60}m {eta % 60}s left" if eta else ""
-                        processing_status[job_id]['step'] = f'MCMC Training ({s}/{total} steps{eta_str})'
+                        processing_status[job_id]['step'] = f'{mcmc_strategy.upper()} Training ({s}/{total} steps{eta_str})'
 
                 result_path = train_mcmc(
                     parent_dir,
@@ -901,11 +905,12 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     use_lpips=(detail_level != 'low'),
                     progress_callback=mcmc_log,
                     output_ply_path=mcmc_output,
+                    strategy_name=mcmc_strategy,
                 )
                 if result_path and os.path.exists(result_path) and os.path.getsize(result_path) > 1024:
                     output_ply = result_path
                     ply_generated = True
-                    trainer_used = 'mcmc'
+                    trainer_used = trainer_choice
                     ply_size = os.path.getsize(output_ply) / (1024 * 1024)
                     add_log(f"MCMC training complete: {ply_size:.1f} MB", "INFO")
                 else:
@@ -1865,6 +1870,10 @@ def upload_files():
     mvs_mode = request.form.get('mvs_quality_mode', 'balanced').lower()
     quality_mode_enabled = mvs_mode in ['quality', 'ultra_sharpness']
     trainer_choice = request.form.get('trainer', 'brush').lower()
+    # Gaussian budget = MCMC cap. 'auto' -> None (scene-scaled, GPU-bounded in the
+    # trainer). Ignored by ADC (it grows organically, no cap).
+    gaussian_budget = request.form.get('gaussian_budget', 'auto').lower()
+    mcmc_cap = None if gaussian_budget in ('auto', '') else int(gaussian_budget)
 
     # advanced_settings OVERRIDES the preset; the merge skips None values so the
     # preset's own defaults are preserved. Only force a value when the user
@@ -1878,6 +1887,7 @@ def upload_files():
         'quality_mode': True if quality_mode_enabled else None,
         'mvs_quality_mode': mvs_mode,
         'trainer': trainer_choice,
+        'mcmc_cap': mcmc_cap,
     }
 
     # Apply sharpness boost
