@@ -1171,10 +1171,10 @@
                                     <label>Format</label>
                                     <select id="trackingFormat">
                                         <option value="all">All (FBX + GLTF + JSON + Blender)</option>
-                                        <option value="fbx">FBX</option>
-                                        <option value="gltf">GLTF</option>
+                                        <option value="fbx">FBX (binary 2013)</option>
+                                        <option value="gltf">GLTF (best for Blender)</option>
                                         <option value="json">JSON</option>
-                                        <option value="blender">Blender Script</option>
+                                        <option value="blender">Blender (.zip: script + data)</option>
                                     </select>
                                     <label>FPS</label>
                                     <input type="number" id="trackingFps" value="30" min="1" max="120">
@@ -1945,7 +1945,7 @@
                     'json': 'cameras.json',
                     'gltf': 'cameras.gltf',
                     'fbx': 'cameras.fbx',
-                    'blender': 'import_camera.py',
+                    'blender': 'blender_camera.zip',
                     'ply': 'sparse_cloud.ply'
                 };
 

@@ -323,18 +323,23 @@ def _export_gltf_manual(poses, output_path, fps=30):
 
 
 def export_camera_fbx(poses, output_path, fps=30):
-    """Export camera animation as FBX file.
-    
-    Uses a minimal custom FBX binary writer (no external dependencies).
-    FBX 7.4+ binary format.
-    
+    """Export camera animation as a **binary** FBX 7.4 (FBX 2013) file.
+
+    Binary (not ASCII) because Blender's importer rejects ASCII FBX outright;
+    binary 7.4 is the most widely compatible flavour (Blender / Max / Maya 2013+ /
+    Unity / Unreal). Falls back to the legacy ASCII writer only if the binary
+    writer is somehow unavailable.
+
     Args:
         poses: List from extract_camera_poses()
         output_path: Output .fbx file path
         fps: Frame rate
     """
-    # FBX is complex binary — for now, export as ASCII FBX (widely compatible)
-    return _export_fbx_ascii(poses, output_path, fps)
+    try:
+        from fbx_binary import write_camera_fbx
+    except ImportError:
+        from pipeline.fbx_binary import write_camera_fbx
+    return write_camera_fbx(poses, output_path, fps)
 
 
 def _export_fbx_ascii(poses, output_path, fps=30):
@@ -560,8 +565,16 @@ print(f"Frames: 1 - {{num_frames}}")
     
     with open(script_path, 'w') as f:
         f.write(script)
-    
-    return script_path
+
+    # The script is useless on its own — it reads camera_poses.json from the same
+    # folder. Bundle both into one ZIP so a single download actually runs.
+    import zipfile
+    zip_path = os.path.join(output_dir, 'blender_camera.zip')
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.write(script_path, 'import_camera.py')
+        zf.write(data_path, 'camera_poses.json')
+
+    return zip_path
 
 
 def export_point_cloud_ply(sparse_dir, output_path, center=True):

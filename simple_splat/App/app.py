@@ -884,7 +884,9 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 mcmc_train_start = time.time()
 
                 def mcmc_log(msg, level="INFO"):
-                    add_log(f"[{mcmc_strategy.upper()}] {msg}", level)
+                    # Trainer step lines already carry a [ADC]/[MCMC] tag; don't double it.
+                    tagged = msg if msg.lstrip().startswith('[') else f"[{mcmc_strategy.upper()}] {msg}"
+                    add_log(tagged, level)
                     step_match = re.search(r'Step (\d+)/(\d+)', msg)
                     if step_match:
                         s, total = int(step_match.group(1)), int(step_match.group(2))
