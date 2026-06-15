@@ -109,8 +109,13 @@ def filter_blurry_images(image_folder, blur_threshold=100.0):
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['PROCESSING_FOLDER'] = 'processing'
+# Anchor data folders to app.py's own directory (absolute), NOT the cwd. Otherwise
+# launching the server from a different working directory (e.g. the repo root vs
+# App/) puts jobs in one 'processing' folder but serves files from another — which
+# made /ply and /align 500 with "file not found" on files that clearly existed.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+app.config['UPLOAD_FOLDER'] = os.path.join(_APP_DIR, 'uploads')
+app.config['PROCESSING_FOLDER'] = os.path.join(_APP_DIR, 'processing')
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max file size
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'zip', 'mp4', 'mov', 'avi', 'mkv', 'webm'}
 
@@ -1967,11 +1972,14 @@ def serve_ply(job_id):
         if output_path:
             ply_path = job_data.get('ply_path')
             if ply_path and os.path.exists(ply_path):
-                return send_file(ply_path, mimetype='application/octet-stream')
+                # abspath: os.path.exists resolves vs cwd, but Flask send_file
+                # resolves relative paths vs app.root_path — they disagree when the
+                # server is launched from a different cwd (caused a 500). Same fix as /align.
+                return send_file(os.path.abspath(ply_path), mimetype='application/octet-stream')
             
             ply_files = list(Path(output_path).rglob('*.ply'))
             if ply_files:
-                return send_file(str(ply_files[0]), mimetype='application/octet-stream')
+                return send_file(os.path.abspath(str(ply_files[0])), mimetype='application/octet-stream')
     
     # Fallback: check filesystem directly for jobs from previous sessions
     job_folder = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
@@ -1987,7 +1995,7 @@ def serve_ply(job_id):
             try:
                 from pipeline.gaussian_splat_utils import generate_ply_from_colmap
                 if generate_ply_from_colmap(sparse_path, output_ply):
-                    return send_file(output_ply, mimetype='application/octet-stream')
+                    return send_file(os.path.abspath(output_ply), mimetype='application/octet-stream')
             except Exception as e:
                 print(f"Error generating PLY: {e}")
     

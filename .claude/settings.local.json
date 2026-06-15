@@ -172,7 +172,17 @@
       "Bash(\"/c/Program Files/Python314/python.exe\" pipeline/fbx_binary.py)",
       "Bash(\"/c/Program Files/Python314/python.exe\" -c \"d=open\\('test_camera.fbx','rb'\\).read\\(27\\); print\\(repr\\(d[:21]\\)\\); import struct; print\\('version', struct.unpack\\('<I', d[23:27]\\)[0]\\)\")",
       "Bash(rm -f test_camera.fbx)",
-      "Bash(PYTHONPATH=\"F:/Codebase/images_to_play/simple_splat/App\" \"/c/Program Files/Python314/python.exe\" /tmp/track_test.py)"
+      "Bash(PYTHONPATH=\"F:/Codebase/images_to_play/simple_splat/App\" \"/c/Program Files/Python314/python.exe\" /tmp/track_test.py)",
+      "Bash(\"/c/Program Files/Python314/python.exe\" -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('step :', d.get\\('step'\\)\\); print\\('prog :', str\\(d.get\\('progress'\\)\\)+'%'\\)\")",
+      "Bash('/c/Program Files/Python314/python.exe' -c ' *)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}, %{size_download} bytes\\\\n\" \"http://localhost:5000/ply/d0b205b0-a17b-4de1-ba0e-d5e2f8cca57a.ply\")",
+      "Bash(curl -s \"http://localhost:5000/ply/d0b205b0-a17b-4de1-ba0e-d5e2f8cca57a.ply\")",
+      "Bash(grep -oiE \"FileNotFoundError|NotFound|No such file|root_path|werkzeug[^<]*|processing[\\\\\\\\/][^< ]*ply|Errno 2[^<]*\")",
+      "Bash(\"/c/Program Files/Python314/python.exe\" -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('status:',d.get\\('status'\\)\\); print\\('output_path:',d.get\\('output_path'\\)\\); print\\('ply_path:',d.get\\('ply_path'\\)\\)\")",
+      "Bash(curl -s -o /dev/null -w \"/ply route: HTTP %{http_code}, %{size_download} bytes\\\\n\" \"http://localhost:5000/ply/d0b205b0-a17b-4de1-ba0e-d5e2f8cca57a.ply\")",
+      "Bash(mkdir -p \"F:/Codebase/images_to_play/simple_splat/App/processing\")",
+      "Bash(mv \"F:/Codebase/images_to_play/processing/\"* \"F:/Codebase/images_to_play/simple_splat/App/processing/\")",
+      "Bash(rmdir \"F:/Codebase/images_to_play/processing\")"
     ],
     "additionalDirectories": [
       "f:\\Codebase\\images_to_play\\.claude"
