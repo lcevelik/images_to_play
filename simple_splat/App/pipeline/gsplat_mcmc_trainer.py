@@ -117,7 +117,7 @@ def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
 
 def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
                sh_degree=3, use_lpips=False, progress_callback=None, output_ply_path=None,
-               strategy_name='mcmc'):
+               strategy_name='mcmc', export_opacity_min=0.03):
     """Train Gaussian Splat using gsplat MCMCStrategy.
 
     Args:
@@ -296,6 +296,7 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
             Ks=K, width=W, height=H,
             near_plane=0.01, far_plane=1000.0,
             sh_degree=sh_degree_to_use, render_mode="RGB",
+            rasterize_mode="antialiased",  # low-pass filter — stops sub-pixel Gaussians shimmering as the camera moves
         )
 
         pred = rendered[0]
@@ -363,25 +364,44 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
     if output_ply_path is None:
         output_ply_path = os.path.join(parent_dir, "gaussian_splat.ply")
 
-    log(f"Exporting {param_dict['means'].shape[0]:,} Gaussians to PLY...")
+    # Clean up before export. MCMC leaves a large pool of near-transparent
+    # "filler" Gaussians (needed for relocation during training) plus some
+    # sub-pixel-tiny ones — at render time both only cause view-dependent
+    # FLICKER, not detail. Drop/clamp them so the splat is stable when moving.
+    with torch.no_grad():
+        means = param_dict['means'].detach()
+        scales = param_dict['scales'].detach()
+        quats = param_dict['quats'].detach()
+        opac = param_dict['opacities'].detach()
+        sh0 = param_dict['sh0'].detach()
+        shN = param_dict['shN'].detach()
+
+        # min-scale floor (log space) tied to scene scale: no sub-pixel Gaussians
+        min_log_scale = float(np.log(scene_scale * 5e-5 + 1e-12))
+        scales = torch.clamp(scales, min=min_log_scale)
+
+        op = torch.sigmoid(opac).reshape(-1)
+        keep = op > export_opacity_min
+        n0 = means.shape[0]
+        n1 = int(keep.sum().item())
+        if 0 < n1 < n0:
+            means, scales, quats, opac, sh0, shN = (
+                means[keep], scales[keep], quats[keep], opac[keep], sh0[keep], shN[keep])
+        log(f"Export prune: {n0:,} -> {n1:,} Gaussians (dropped {n0-n1:,} with opacity<={export_opacity_min}); scales floored")
+
+    log(f"Exporting {means.shape[0]:,} Gaussians to PLY...")
     try:
         from gsplat import export_splats
         # export_splats writes values verbatim; the 3DGS PLY format stores
         # log-scales and logit-opacities, so pass the RAW params — viewers
         # apply exp/sigmoid themselves (activated values render as giant blobs)
-        export_splats(
-            means=param_dict['means'].detach(),
-            scales=param_dict['scales'].detach(),
-            quats=param_dict['quats'].detach(),
-            opacities=param_dict['opacities'].detach(),
-            sh0=param_dict['sh0'].detach(),
-            shN=param_dict['shN'].detach(),
-            format="ply",
-            save_to=output_ply_path,
-        )
+        export_splats(means=means, scales=scales, quats=quats, opacities=opac,
+                      sh0=sh0, shN=shN, format="ply", save_to=output_ply_path)
     except ImportError:
         # Fallback: manual PLY export if export_splats not available
-        _export_3dgs_ply(param_dict, output_ply_path, sh_degree)
+        _export_3dgs_ply({'means': means, 'scales': scales, 'quats': quats,
+                          'opacities': opac, 'sh0': sh0, 'shN': shN},
+                         output_ply_path, sh_degree)
 
     size_mb = os.path.getsize(output_ply_path) / 1024 / 1024
     log(f"Exported: {output_ply_path} ({size_mb:.1f} MB)")
