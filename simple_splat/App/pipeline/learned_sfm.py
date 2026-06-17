@@ -26,6 +26,7 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     from lightglue.utils import load_image, rbd
     import pycolmap
 
+    os.makedirs(output_dir, exist_ok=True)  # Database.open() needs the dir to exist
     dev = torch.device('cuda' if (device == 'cuda' and torch.cuda.is_available()) else 'cpu')
     extractor = SuperPoint(max_num_keypoints=max_kpts).eval().to(dev)
     matcher = LightGlue(features='superpoint').eval().to(dev)
