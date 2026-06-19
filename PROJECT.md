@@ -13,7 +13,8 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## In Progress
 
-- **Rerun the pipeline on the learned-SfM dense seed** — `pipeline/learned_sfm.py` (SuperPoint+LightGlue) replaces COLMAP SIFT (3,325 pts → much denser). Full 58-img run → `processing/learned-sfm-parking/sparse/0`. Next: retrain MCMC v2 (anti-flicker) on it, expect far more detail + less haze.
+- **Brush vs MCMC A/B on the 21k learned seed** — MCMC side DONE (888K Gaussians, 200 MB, PSNR ~26.8 at `processing/learned-21k/`). Next: run **Brush** on the same `processing/learned-21k/` seed (settings TBD with user — pick steps + max-splats that FINISH; prior 200k/10M run timed out at 50%).
+- **Wire `learned_sfm` into the app UI** as a matcher toggle (currently CLI-only).
 
 ## To Do
 
@@ -33,6 +34,7 @@ Edit the tasks below. Use - [ ] for open, - [x] for done.
 
 ## Done
 
+- [x] 2026-06-19 — **Dense-seed workflow proven**: learned matcher (SuperPoint@4096, default mapper) seeds **21,831 pts (6× COLMAP's 3,651)** on the textureless parking lot; → `colmap image_undistorter` → MCMC 4M (anti-flicker + LPIPS) → **888K Gaussians, 200 MB, PSNR ~26.8**. Levers that backfired (recorded): 8192 kpts, loose mapper, ALIKED — all gave FEWER points. `learned_sfm` gained extractor/mapper params.
 - [x] 2026-06-17 — **Learned-SfM front-end** (`pipeline/learned_sfm.py`): SuperPoint+LightGlue → pycolmap DB (geometric verification via `estimate_two_view_geometry`) → `incremental_mapping` → `sparse/0`. Deps `lightglue`+`kornia` installed (Py 3.14). Validated 12img→3,484 pts vs COLMAP 58img→3,325.
 - [x] 2026-06-17 — **MCMC/ADC viewer-flicker fix**: antialiased rasterization + export opacity-prune (drop ≤0.03) + min-scale floor. On the 4M run this pruned **4,000,000→956,344** (76% was invisible filler) → 215MB vs 900MB. Confirmed the flicker root cause.
 - [x] 2026-06-17 — **Binary FBX 7.4 (2013)** camera export (`pipeline/fbx_binary.py`) replacing ASCII (Blender-rejected); **Blender export now a ZIP** (.py+.json); glTF steered as the Blender path.

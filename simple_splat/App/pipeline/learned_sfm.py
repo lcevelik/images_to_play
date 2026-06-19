@@ -20,7 +20,9 @@ import numpy as np
 
 
 def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
-                    min_matches=15, progress=print):
+                    min_matches=15, progress=print, extractor='superpoint',
+                    keep_two_view_tracks=False, mapper_min_angle=1.5,
+                    mapper_max_reproj=4.0, mapper_min_matches=15):
     import torch
     from lightglue import LightGlue, SuperPoint
     from lightglue.utils import load_image, rbd
@@ -28,8 +30,16 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
 
     os.makedirs(output_dir, exist_ok=True)  # Database.open() needs the dir to exist
     dev = torch.device('cuda' if (device == 'cuda' and torch.cuda.is_available()) else 'cpu')
-    extractor = SuperPoint(max_num_keypoints=max_kpts).eval().to(dev)
-    matcher = LightGlue(features='superpoint').eval().to(dev)
+    feat = str(extractor).lower()
+    if feat == 'aliked':
+        from lightglue import ALIKED as Extractor
+    elif feat == 'disk':
+        from lightglue import DISK as Extractor
+    else:
+        feat = 'superpoint'
+        from lightglue import SuperPoint as Extractor
+    ext = Extractor(max_num_keypoints=max_kpts).eval().to(dev)
+    matcher = LightGlue(features=feat).eval().to(dev)
 
     exts = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
     imgs = sorted([f for f in glob.glob(os.path.join(image_dir, '*')) if f.endswith(exts)])
@@ -44,7 +54,7 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     for i, f in enumerate(imgs):
         img = load_image(f).to(dev)                      # [3,H,W] float [0,1]
         with torch.no_grad():
-            ft = extractor.extract(img)                  # batched dict
+            ft = ext.extract(img)                        # batched dict
         feats.append(ft)
         kpts.append(rbd(ft)['keypoints'].cpu().numpy())  # [N,2] pixel coords
         sizes.append((int(img.shape[-1]), int(img.shape[-2])))  # (W,H)
@@ -90,7 +100,20 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     progress(f"[learned-sfm] {nverified} verified pairs; running incremental mapping...")
 
     # --- incremental mapping -> largest reconstruction -> sparse/0 ---
-    recs = pycolmap.incremental_mapping(db_path, image_dir, output_dir)
+    # Loosen the mapper to KEEP more points (denser seed for splatting). The
+    # biggest lever: ignore_two_view_tracks defaults True, which discards every
+    # point seen in only 2 views — huge on a limited-overlap pan. Plus a lower
+    # min triangulation angle and higher reproj tolerance. Splat training prunes
+    # any resulting noise, so trading a little precision for density is the right call.
+    opt = pycolmap.IncrementalPipelineOptions()
+    opt.min_num_matches = mapper_min_matches
+    opt.triangulation.ignore_two_view_tracks = (not keep_two_view_tracks)
+    opt.triangulation.min_angle = mapper_min_angle
+    opt.triangulation.complete_max_reproj_error = mapper_max_reproj
+    opt.triangulation.merge_max_reproj_error = mapper_max_reproj
+    progress(f"[learned-sfm] mapper: keep_2view={keep_two_view_tracks}, min_angle={mapper_min_angle}, "
+             f"max_reproj={mapper_max_reproj}, min_matches={mapper_min_matches}")
+    recs = pycolmap.incremental_mapping(db_path, image_dir, output_dir, options=opt)
     if not recs:
         progress("[learned-sfm] mapping produced NO reconstruction")
         return None
@@ -110,9 +133,11 @@ if __name__ == "__main__":
     p.add_argument("--output", "-o", required=True)
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     p.add_argument("--max-kpts", type=int, default=2048)
+    p.add_argument("--extractor", default="superpoint", choices=["superpoint", "aliked", "disk"])
     a = p.parse_args()
     import time
     t0 = time.time()
     r = run_learned_sfm(a.images, a.output, device=a.device, max_kpts=a.max_kpts,
+                        extractor=a.extractor,
                         progress=lambda m: print(f"[{int(time.time()-t0)}s] {m}", flush=True))
     print("RESULT:", r)
