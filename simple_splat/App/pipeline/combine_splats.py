@@ -61,6 +61,96 @@ def combine(sharp_ply, clean_ply, sparse_dir, out_ply,
     return out_ply
 
 
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _logit(p):
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    return np.log(p / (1 - p))
+
+
+def combine_fade(sharp_ply, clean_ply, sparse_dir, out_ply, k=6,
+                 lo_mult=2.0, hi_mult=12.0, min_opacity=0.02, fade_sharp=True,
+                 brush_needle_max=0.0, brush_white_max=1.0, progress=print):
+    """Smooth crossfade by LOCAL SEED DENSITY (no hard cut -> no seam/halo).
+
+    Density proxy = distance to the k-th nearest seed point (small = dense surface,
+    large = sparse/sky). A smoothstep weight w(=1 dense .. 0 sparse) scales the
+    SHARP splat's opacity by w and the CLEAN splat's by (1-w). In the transition
+    both fade, so edges blend instead of slamming together. Faded-out Gaussians
+    (final opacity < min_opacity) are dropped.
+    """
+    A, pa = _read_ply(sharp_ply)    # MCMC — sharp
+    B, pb = _read_ply(clean_ply)    # Brush — clean sky
+    assert set(pa) == set(pb), "property sets differ"
+
+    seed = _seed_xyz(sparse_dir)
+    from scipy.spatial import cKDTree
+    tree = cKDTree(seed)
+    # density scale from the seeds' own k-th NN distance
+    dks, _ = tree.query(seed, k=k + 1)
+    base = float(np.median(dks[:, -1]))
+    lo, hi = base * lo_mult, base * hi_mult
+    progress(f"[fade] seed k={k} base={base:.4f} -> fade {lo:.3f}..{hi:.3f} (w=1 dense .. 0 sparse)")
+
+    def fg_weight(xyz):
+        dk, _ = tree.query(xyz, k=k)
+        d = dk[:, -1]
+        t = np.clip((d - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+        return 1.0 - (t * t * (3 - 2 * t))      # smoothstep, 1 near dense seeds
+
+    # If the sharp (MCMC) side is sky-masked it has no sky junk — keep ALL of it
+    # (including its dense soft layer) and fade in ONLY Brush for the sky.
+    if fade_sharp:
+        wA = fg_weight(np.stack([A['x'], A['y'], A['z']], 1))
+    else:
+        wA = np.ones(len(A), dtype=np.float64)
+        progress("[fade] keep_all_sharp: MCMC kept in full (sky-masked); only Brush is faded")
+    wB = 1.0 - fg_weight(np.stack([B['x'], B['y'], B['z']], 1))   # Brush keeps sky/sparse
+
+    def apply(arr, w):
+        op = _sigmoid(arr['opacity']) * w
+        arr = arr.copy()
+        arr['opacity'] = _logit(op).astype(np.float32)
+        return arr, op
+    A2, opA = apply(A, wA)
+    B2, opB = apply(B, wB)
+    A2 = A2[opA >= min_opacity]
+    B2sel = B2[opB >= min_opacity]
+    progress(f"[fade] MCMC kept {len(A2):,}/{len(A):,} | Brush kept {len(B2sel):,}/{len(B):,}")
+
+    B3 = np.empty(len(B2sel), dtype=A.dtype)     # realign Brush fields to MCMC order
+    for name in pa:
+        B3[name] = B2sel[name]
+
+    # Per-component cleaning: the Brush side is now ONLY sky/background, which must
+    # be smooth -> ANY needle Gaussian there is an artifact. Prune them hard. (This
+    # would damage a textured foreground, but is exactly right on sky.) MCMC is
+    # left untouched — it owns the clean foreground.
+    if brush_needle_max and brush_needle_max > 0:
+        bsc = np.exp(np.stack([B3['scale_0'], B3['scale_1'], B3['scale_2']], 1))
+        bss = np.sort(bsc, axis=1)
+        bnd = bss[:, 2] / np.maximum(bss[:, 1], 1e-9)
+        bkeep = bnd <= brush_needle_max
+        progress(f"[fade] Brush(sky) needle prune (max/mid>{brush_needle_max}): drop {int((~bkeep).sum()):,}")
+        B3 = B3[bkeep]
+
+    # WHITE-bloom prune: real sky is BLUE, so a sky Gaussian whose colour is
+    # whitish (high RED channel — blue sky has low red) is a halo/bloom artifact.
+    # SH DC -> colour: c = 0.5 + 0.28209*f_dc. Drop sky Gaussians with red > thresh.
+    if brush_white_max and brush_white_max < 1.0:
+        red = 0.5 + 0.28209 * B3['f_dc_0']
+        wkeep = red <= brush_white_max
+        progress(f"[fade] Brush(sky) white-bloom prune (red>{brush_white_max}): drop {int((~wkeep).sum()):,}")
+        B3 = B3[wkeep]
+
+    out = np.concatenate([A2, B3])
+    _write_ply(out_ply, out, pa)
+    progress(f"[fade] -> {len(out):,} Gaussians -> {out_ply}")
+    return out_ply
+
+
 if __name__ == "__main__":
     import argparse, time
     p = argparse.ArgumentParser()
@@ -68,9 +158,22 @@ if __name__ == "__main__":
     p.add_argument("--clean", required=True, help="Brush PLY (sky/background source)")
     p.add_argument("--sparse", required=True, help="sparse/0 dir (seed points)")
     p.add_argument("--out", "-o", required=True)
-    p.add_argument("--mcmc-mult", type=float, default=8.0, help="MCMC kept within this x seed-spacing")
-    p.add_argument("--brush-mult", type=float, default=None, help="Brush kept beyond this x seed-spacing (>mcmc-mult opens a gap)")
+    p.add_argument("--fade", action="store_true", help="smooth density crossfade (recommended)")
+    p.add_argument("--k", type=int, default=6)
+    p.add_argument("--lo-mult", type=float, default=2.0)
+    p.add_argument("--hi-mult", type=float, default=12.0)
+    p.add_argument("--min-opacity", type=float, default=0.02)
+    p.add_argument("--keep-all-sharp", action="store_true", help="don't fade MCMC (use when it's sky-masked/clean)")
+    p.add_argument("--mcmc-mult", type=float, default=8.0)
+    p.add_argument("--brush-mult", type=float, default=None)
+    p.add_argument("--brush-needle-max", type=float, default=0.0, help="hard-prune Brush(sky) needles above this max/mid (0=off)")
+    p.add_argument("--brush-white-max", type=float, default=1.0, help="drop Brush(sky) Gaussians with red colour above this (1=off; ~0.6 kills white blooms)")
     a = p.parse_args()
     t0 = time.time()
-    combine(a.sharp, a.clean, a.sparse, a.out, a.mcmc_mult, a.brush_mult,
-            progress=lambda m: print(f"[{int(time.time()-t0)}s] {m}", flush=True))
+    log = lambda m: print(f"[{int(time.time()-t0)}s] {m}", flush=True)
+    if a.fade:
+        combine_fade(a.sharp, a.clean, a.sparse, a.out, a.k, a.lo_mult, a.hi_mult,
+                     a.min_opacity, fade_sharp=not a.keep_all_sharp,
+                     brush_needle_max=a.brush_needle_max, brush_white_max=a.brush_white_max, progress=log)
+    else:
+        combine(a.sharp, a.clean, a.sparse, a.out, a.mcmc_mult, a.brush_mult, progress=log)

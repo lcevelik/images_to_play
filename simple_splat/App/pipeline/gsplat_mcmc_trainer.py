@@ -129,7 +129,8 @@ def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
 
 def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
                sh_degree=3, use_lpips=False, progress_callback=None, output_ply_path=None,
-               strategy_name='mcmc', export_opacity_min=0.03):
+               strategy_name='mcmc', export_opacity_min=0.03,
+               aniso_reg=0.0, needle_max=4.0, use_sky_model=False):
     """Train Gaussian Splat using gsplat MCMCStrategy.
 
     Args:
@@ -254,6 +255,17 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
         log(f"Strategy: MCMC — fills toward cap {cap_max:,}")
     strategy.check_sanity(param_dict, optimizers)
 
+    # Sky model (Postshot-style): a small MLP that explains the background sky, so
+    # the Gaussians never need to grow there -> clean foreground + coherent thin
+    # structures. When ON we DON'T sky-mask (the model needs the sky pixels to learn).
+    sky_model = sky_opt = None
+    if use_sky_model:
+        from pipeline.sky_model import SkyModel, ray_directions
+        sky_model = SkyModel().to(device)
+        sky_opt = torch.optim.Adam(sky_model.parameters(), lr=1e-3)
+        dataset['has_masks'] = False   # sky model replaces masking
+        log("Sky model ENABLED — learned environment background; Gaussians keep the foreground only")
+
     # Gaussian-windowed SSIM (pytorch_msssim). A naive avg_pool SSIM has biased
     # border statistics and negative variances whose gradients wreck training —
     # verified: 32 dB (L1 only) vs 10.5 dB (L1 + avg_pool SSIM) on synthetic data.
@@ -300,7 +312,7 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
         sh_degree_to_use = min(step // 1000, sh_degree)
 
         colors_sh = torch.cat([param_dict['sh0'], param_dict['shN']], dim=1)
-        rendered, _, info = rasterization(
+        rendered, alphas, info = rasterization(
             means=param_dict['means'],
             quats=param_dict['quats'],
             scales=torch.exp(param_dict['scales']),
@@ -314,6 +326,14 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
         )
 
         pred = rendered[0]
+        # Sky model: composite the rendered foreground OVER the learned sky using
+        # the Gaussian alpha. Background pixels (alpha~0) become pure sky -> the
+        # Gaussians get no gradient to fill the sky, so it stays floater-free.
+        if sky_model is not None:
+            c2w = torch.linalg.inv(w2c)
+            dirs = ray_directions(K[0], c2w, H, W, device)     # [H,W,3]
+            sky = sky_model(dirs)                              # [H,W,3]
+            pred = pred + (1.0 - alphas[0]) * sky
         # Sky mask: set the sky region of pred := gt so it contributes ZERO to
         # every loss (L1/SSIM/LPIPS). The trainer then never reconstructs the sky
         # -> no sky floaters, all capacity goes to real surfaces. pred (unmasked)
@@ -332,6 +352,14 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
         if not is_adc:
             loss = loss + opacity_reg * torch.sigmoid(param_dict['opacities']).abs().mean()
             loss = loss + scale_reg * torch.exp(param_dict['scales']).abs().mean()
+            # Anisotropy (needle) regularizer: penalize when the longest axis is much
+            # bigger than the MIDDLE axis (a rod), keeping Gaussians round-ish like
+            # Postshot's. Uses max/mid (not max/min) so flat surface disks are spared.
+            # Clamp the penalty so the extreme tail can't blow up the loss.
+            if aniso_reg > 0:
+                _ss = torch.sort(torch.exp(param_dict['scales']), dim=1).values  # [N,3] asc
+                _needle = _ss[:, 2] / _ss[:, 1].clamp(min=1e-6)
+                loss = loss + aniso_reg * torch.relu(_needle - needle_max).clamp(max=20.0).mean()
 
         if lpips_fn is not None:
             # LPIPS on a random 512px crop — full-res VGG backward at 3200px+
@@ -366,6 +394,9 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
             opt.step(visibility=vis_mask)
             opt.zero_grad(set_to_none=True)
         means_scheduler.step()
+        if sky_opt is not None:
+            sky_opt.step()
+            sky_opt.zero_grad(set_to_none=True)
 
         if is_adc:
             # Clone/split/prune. packed flag must match rasterization's mode.
