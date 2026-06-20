@@ -31,6 +31,8 @@ def load_colmap_dataset(parent_dir):
 
     sparse_dir = os.path.join(parent_dir, "sparse", "0")
     images_dir = os.path.join(parent_dir, "images")
+    masks_dir = os.path.join(parent_dir, "masks")   # optional sky masks (255=keep, 0=sky)
+    has_masks = os.path.isdir(masks_dir)
 
     if not os.path.exists(sparse_dir):
         raise FileNotFoundError(f"Sparse reconstruction not found: {sparse_dir}")
@@ -41,7 +43,7 @@ def load_colmap_dataset(parent_dir):
     available_images = {f.lower(): f for f in os.listdir(images_dir)
                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))}
 
-    cameras, w2c_mats, image_tensors, image_names = [], [], [], []
+    cameras, w2c_mats, image_tensors, image_names, image_masks = [], [], [], [], []
 
     for _, image in recon.images.items():
         name_lower = image.name.lower()
@@ -56,6 +58,15 @@ def load_colmap_dataset(parent_dir):
 
         img = Image.open(os.path.join(images_dir, available_images[name_lower])).convert('RGB')
         image_tensors.append(torch.from_numpy(np.array(img, dtype=np.float32) / 255.0))
+
+        # optional foreground mask (1=keep, 0=sky); matched by basename
+        mk = None
+        if has_masks:
+            mpath = os.path.join(masks_dir, os.path.splitext(available_images[name_lower])[0] + '.png')
+            if os.path.exists(mpath):
+                m = Image.open(mpath).convert('L')
+                mk = torch.from_numpy((np.array(m) > 127).astype(np.float32))
+        image_masks.append(mk)
 
         cam = recon.cameras[image.camera_id]
         cameras.append({
@@ -81,6 +92,7 @@ def load_colmap_dataset(parent_dir):
     return {
         'cameras': cameras, 'w2c_mats': w2c_mats,
         'images': image_tensors, 'image_names': image_names,
+        'masks': image_masks, 'has_masks': has_masks and any(m is not None for m in image_masks),
         'sparse_xyz': sparse_xyz, 'sparse_rgb': sparse_rgb,
     }
 
@@ -151,6 +163,8 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
     num_images = len(dataset['images'])
     num_sparse = dataset['sparse_xyz'].shape[0]
     log(f"Loaded {num_images} images, {num_sparse:,} sparse points")
+    if dataset.get('has_masks'):
+        log(f"Sky masks ACTIVE — sky pixels excluded from the loss (no sky floaters)")
 
     if num_images == 0 or num_sparse == 0:
         log("No images or sparse points — cannot train", "ERROR")
@@ -300,10 +314,19 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
         )
 
         pred = rendered[0]
-        if ssim_loss is not None:
-            loss = 0.8 * F.l1_loss(pred, gt) + 0.2 * ssim_loss(pred, gt)
+        # Sky mask: set the sky region of pred := gt so it contributes ZERO to
+        # every loss (L1/SSIM/LPIPS). The trainer then never reconstructs the sky
+        # -> no sky floaters, all capacity goes to real surfaces. pred (unmasked)
+        # is kept for the PSNR log.
+        if dataset.get('has_masks') and dataset['masks'][idx] is not None:
+            mk3 = dataset['masks'][idx].to(device).unsqueeze(-1)   # [H,W,1] 1=keep,0=sky
+            pred_l = pred * mk3 + gt * (1.0 - mk3)
         else:
-            loss = F.l1_loss(pred, gt)
+            pred_l = pred
+        if ssim_loss is not None:
+            loss = 0.8 * F.l1_loss(pred_l, gt) + 0.2 * ssim_loss(pred_l, gt)
+        else:
+            loss = F.l1_loss(pred_l, gt)
         # Opacity/scale L1 only for MCMC — they create the dead Gaussians MCMC
         # relocates. ADC prunes on its own, so the regularizers would just fade detail.
         if not is_adc:
@@ -316,7 +339,7 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
             ch, cw = min(512, H), min(512, W)
             y0 = np.random.randint(H - ch + 1)
             x0 = np.random.randint(W - cw + 1)
-            p_c, g_c = pred[y0:y0+ch, x0:x0+cw], gt[y0:y0+ch, x0:x0+cw]
+            p_c, g_c = pred_l[y0:y0+ch, x0:x0+cw], gt[y0:y0+ch, x0:x0+cw]
             # Normalize to [-1, 1] and convert to [N, C, H, W] for LPIPS
             p_lp = (p_c.clamp(0, 1) * 2 - 1).permute(2, 0, 1).unsqueeze(0)
             g_lp = (g_c.clamp(0, 1) * 2 - 1).permute(2, 0, 1).unsqueeze(0)
