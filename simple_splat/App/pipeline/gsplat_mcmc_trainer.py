@@ -19,8 +19,11 @@ import numpy as np
 from pathlib import Path
 
 
-def load_colmap_dataset(parent_dir):
+def load_colmap_dataset(parent_dir, max_size=0):
     """Load COLMAP reconstruction and undistorted images.
+
+    max_size>0 downsamples images so the longest side <= max_size (Postshot-style),
+    scaling the intrinsics to match — big speed/VRAM win at full-res captures.
 
     Images stay on CPU; only the current training image is moved to GPU
     per step to avoid OOM on GPUs with <16 GB VRAM and 200+ images.
@@ -57,6 +60,12 @@ def load_colmap_dataset(parent_dir):
                 continue
 
         img = Image.open(os.path.join(images_dir, available_images[name_lower])).convert('RGB')
+        # optional downsample (longest side -> max_size) for speed/VRAM
+        scale = 1.0
+        if max_size and max(img.size) > max_size:
+            scale = max_size / float(max(img.size))
+            img = img.resize((max(1, round(img.size[0] * scale)),
+                              max(1, round(img.size[1] * scale))), Image.LANCZOS)
         image_tensors.append(torch.from_numpy(np.array(img, dtype=np.float32) / 255.0))
 
         # optional foreground mask (1=keep, 0=sky); matched by basename
@@ -65,14 +74,16 @@ def load_colmap_dataset(parent_dir):
             mpath = os.path.join(masks_dir, os.path.splitext(available_images[name_lower])[0] + '.png')
             if os.path.exists(mpath):
                 m = Image.open(mpath).convert('L')
+                if scale != 1.0:
+                    m = m.resize(img.size, Image.NEAREST)
                 mk = torch.from_numpy((np.array(m) > 127).astype(np.float32))
         image_masks.append(mk)
 
         cam = recon.cameras[image.camera_id]
         cameras.append({
-            'width': cam.width, 'height': cam.height,
-            'fx': float(cam.focal_length_x), 'fy': float(cam.focal_length_y),
-            'cx': float(cam.principal_point_x), 'cy': float(cam.principal_point_y),
+            'width': int(round(cam.width * scale)), 'height': int(round(cam.height * scale)),
+            'fx': float(cam.focal_length_x) * scale, 'fy': float(cam.focal_length_y) * scale,
+            'cx': float(cam.principal_point_x) * scale, 'cy': float(cam.principal_point_y) * scale,
         })
 
         # pycolmap cam_from_world is w2c — exactly what gsplat's viewmats expects
@@ -130,7 +141,7 @@ def init_gaussians_from_sparse(xyz, rgb, sh_degree=3):
 def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
                sh_degree=3, use_lpips=False, progress_callback=None, output_ply_path=None,
                strategy_name='mcmc', export_opacity_min=0.03,
-               aniso_reg=0.0, needle_max=4.0, use_sky_model=False):
+               aniso_reg=0.0, needle_max=4.0, use_sky_model=False, max_size=0):
     """Train Gaussian Splat using gsplat MCMCStrategy.
 
     Args:
@@ -160,7 +171,7 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
     log(f"MCMC trainer using device: {device}")
 
     log("Loading COLMAP dataset...")
-    dataset = load_colmap_dataset(parent_dir)
+    dataset = load_colmap_dataset(parent_dir, max_size=max_size)
     num_images = len(dataset['images'])
     num_sparse = dataset['sparse_xyz'].shape[0]
     log(f"Loaded {num_images} images, {num_sparse:,} sparse points")
