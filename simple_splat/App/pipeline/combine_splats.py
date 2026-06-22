@@ -72,14 +72,20 @@ def _logit(p):
 
 def combine_fade(sharp_ply, clean_ply, sparse_dir, out_ply, k=6,
                  lo_mult=2.0, hi_mult=12.0, min_opacity=0.02, fade_sharp=True,
-                 brush_needle_max=0.0, brush_white_max=1.0, progress=print):
+                 brush_needle_max=0.0, brush_white_max=1.0,
+                 fade_mode='smoothstep', sigma_mult=2.0, progress=print):
     """Smooth crossfade by LOCAL SEED DENSITY (no hard cut -> no seam/halo).
 
     Density proxy = distance to the k-th nearest seed point (small = dense surface,
-    large = sparse/sky). A smoothstep weight w(=1 dense .. 0 sparse) scales the
-    SHARP splat's opacity by w and the CLEAN splat's by (1-w). In the transition
-    both fade, so edges blend instead of slamming together. Faded-out Gaussians
+    large = sparse/sky). A weight w(=1 dense .. 0 sparse) scales the SHARP splat's
+    opacity by w and the CLEAN splat's by (1-w). Faded-out Gaussians
     (final opacity < min_opacity) are dropped.
+
+    fade_mode:
+      'smoothstep' (default) — plateau at 1 for d<lo, smoothstep down, plateau at 0 for d>hi.
+                              Tune via lo_mult/hi_mult.
+      'gaussian'             — w = exp(-(d/sigma)^2). No plateaus, continuous everywhere.
+                              Tune via sigma_mult (sigma = sigma_mult * base).
     """
     A, pa = _read_ply(sharp_ply)    # MCMC — sharp
     B, pb = _read_ply(clean_ply)    # Brush — clean sky
@@ -91,14 +97,22 @@ def combine_fade(sharp_ply, clean_ply, sparse_dir, out_ply, k=6,
     # density scale from the seeds' own k-th NN distance
     dks, _ = tree.query(seed, k=k + 1)
     base = float(np.median(dks[:, -1]))
-    lo, hi = base * lo_mult, base * hi_mult
-    progress(f"[fade] seed k={k} base={base:.4f} -> fade {lo:.3f}..{hi:.3f} (w=1 dense .. 0 sparse)")
 
-    def fg_weight(xyz):
-        dk, _ = tree.query(xyz, k=k)
-        d = dk[:, -1]
-        t = np.clip((d - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
-        return 1.0 - (t * t * (3 - 2 * t))      # smoothstep, 1 near dense seeds
+    if fade_mode == 'gaussian':
+        sigma = base * sigma_mult
+        progress(f"[fade] mode=gaussian k={k} base={base:.4f} sigma={sigma:.3f} (continuous, no plateaus)")
+        def fg_weight(xyz):
+            dk, _ = tree.query(xyz, k=k)
+            d = dk[:, -1]
+            return np.exp(-(d / sigma) ** 2)
+    else:
+        lo, hi = base * lo_mult, base * hi_mult
+        progress(f"[fade] mode=smoothstep k={k} base={base:.4f} -> fade {lo:.3f}..{hi:.3f}")
+        def fg_weight(xyz):
+            dk, _ = tree.query(xyz, k=k)
+            d = dk[:, -1]
+            t = np.clip((d - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+            return 1.0 - (t * t * (3 - 2 * t))      # smoothstep, 1 near dense seeds
 
     # If the sharp (MCMC) side is sky-masked it has no sky junk — keep ALL of it
     # (including its dense soft layer) and fade in ONLY Brush for the sky.
