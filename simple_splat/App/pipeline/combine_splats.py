@@ -70,6 +70,27 @@ def _logit(p):
     return np.log(p / (1 - p))
 
 
+def _otsu_threshold(vals, lo=0.0, hi=8.0, bins=256):
+    """Otsu's method: the value that maximises between-class variance — i.e. the
+    valley of a bimodal distribution. Returns a threshold in the same units as vals."""
+    v = np.clip(vals, lo, hi)
+    hist, edges = np.histogram(v, bins=bins, range=(lo, hi))
+    hist = hist.astype(np.float64)
+    total = hist.sum()
+    if total == 0:
+        return (lo + hi) / 2
+    centers = (edges[:-1] + edges[1:]) / 2
+    w0 = np.cumsum(hist)
+    w1 = total - w0
+    csum = np.cumsum(hist * centers)
+    grand = csum[-1]
+    mu0 = csum / np.maximum(w0, 1)
+    mu1 = (grand - csum) / np.maximum(w1, 1)
+    var_between = w0 * w1 * (mu0 - mu1) ** 2
+    idx = int(np.argmax(var_between[:-1]))   # last bin has w1=0
+    return float(centers[idx])
+
+
 def combine_fade(sharp_ply, clean_ply, sparse_dir, out_ply, k=6,
                  lo_mult=2.0, hi_mult=12.0, min_opacity=0.02, fade_sharp=True,
                  brush_needle_max=0.0, brush_white_max=1.0,
@@ -99,6 +120,18 @@ def combine_fade(sharp_ply, clean_ply, sparse_dir, out_ply, k=6,
     base = float(np.median(dks[:, -1]))
 
     if fade_mode == 'gaussian':
+        if sigma_mult == 'auto':
+            # Auto-pick the multiplier from the SHARP splat's own distance-to-seed
+            # distribution (in units of base). It is typically bimodal: a tall peak
+            # near 0 (Gaussians sitting on real seeded surfaces) and a second mode
+            # (void/sky filler). Otsu's threshold finds the valley between them, so
+            # the handoff to the clean splat lands where surfaces actually end —
+            # no hand-tuned constant. (Sony's pipeline does this with a learned
+            # segmenter; this is the cheap geometric equivalent.)
+            dA0, _ = tree.query(np.stack([A['x'], A['y'], A['z']], 1), k=k)
+            ratio = dA0[:, -1] / base
+            sigma_mult = _otsu_threshold(ratio, lo=0.0, hi=8.0, bins=256)
+            progress(f"[fade] AUTO sigma_mult={sigma_mult:.3f} (Otsu valley of sharp-splat dist-to-seed)")
         sigma = base * sigma_mult
         progress(f"[fade] mode=gaussian k={k} base={base:.4f} sigma={sigma:.3f} (continuous, no plateaus)")
         def fg_weight(xyz):
