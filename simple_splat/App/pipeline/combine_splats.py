@@ -94,7 +94,7 @@ def _otsu_threshold(vals, lo=0.0, hi=8.0, bins=256):
 def combine_fade(sharp_ply, clean_ply, sparse_dir, out_ply, k=6,
                  lo_mult=2.0, hi_mult=12.0, min_opacity=0.02, fade_sharp=True,
                  brush_needle_max=0.0, brush_white_max=1.0,
-                 fade_mode='smoothstep', sigma_mult=2.0, progress=print):
+                 fade_mode='gaussian', sigma_mult=1.7, progress=print):
     """Smooth crossfade by LOCAL SEED DENSITY (no hard cut -> no seam/halo).
 
     Density proxy = distance to the k-th nearest seed point (small = dense surface,
@@ -103,10 +103,15 @@ def combine_fade(sharp_ply, clean_ply, sparse_dir, out_ply, k=6,
     (final opacity < min_opacity) are dropped.
 
     fade_mode:
-      'smoothstep' (default) — plateau at 1 for d<lo, smoothstep down, plateau at 0 for d>hi.
-                              Tune via lo_mult/hi_mult.
-      'gaussian'             — w = exp(-(d/sigma)^2). No plateaus, continuous everywhere.
-                              Tune via sigma_mult (sigma = sigma_mult * base).
+      'gaussian' (DEFAULT, the proven winner) — w = exp(-(d/sigma)^2), continuous, no
+                              plateaus. sigma = sigma_mult * base. sigma_mult=1.7 wins or
+                              ties by eye across textureless-outdoor / object-centric /
+                              indoor scenes — base already auto-scales per scene, so 1.7
+                              transfers as a fixed aesthetic constant (no per-scene tuning).
+                              sigma_mult='auto' (Otsu valley) is geometrically principled
+                              but looked LOOSER than the eye prefers — kept only as an option.
+      'smoothstep'           — plateau at 1 for d<lo, smoothstep down, plateau at 0 for d>hi.
+                              Older mode; tune via lo_mult/hi_mult.
     """
     A, pa = _read_ply(sharp_ply)    # MCMC — sharp
     B, pb = _read_ply(clean_ply)    # Brush — clean sky
