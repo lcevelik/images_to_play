@@ -189,6 +189,26 @@
         .header-btn svg { width: 13px; height: 13px; opacity: .8; }
         .header-btn:hover { background: var(--surface-3); border-color: var(--border-strong); color: var(--text); transform: translateY(-1px); }
         .header-btn.danger:hover { border-color: rgba(248,113,113,.4); color: var(--danger); }
+        .menu-wrap { position: relative; }
+        .menu-btn { padding: 7px 9px; }
+        .menu-dropdown {
+            position: absolute; right: 0; top: calc(100% + 6px);
+            background: var(--surface-2); border: 1px solid var(--border-strong);
+            border-radius: 10px; padding: 6px; min-width: 168px;
+            display: none; flex-direction: column; gap: 2px; z-index: 200;
+            box-shadow: 0 10px 28px rgba(0,0,0,.45);
+        }
+        .menu-dropdown.open { display: flex; }
+        .menu-item {
+            display: flex; align-items: center; gap: 9px;
+            padding: 8px 10px; border-radius: 7px; width: 100%;
+            background: none; border: none; color: var(--text-2);
+            font: inherit; font-size: 13px; text-align: left; text-decoration: none; cursor: pointer;
+        }
+        .menu-item:hover { background: var(--surface-3); color: var(--text); }
+        .menu-item.danger:hover { color: var(--danger); }
+        .menu-item svg { width: 14px; height: 14px; opacity: .8; flex-shrink: 0; }
+        .menu-sep { height: 1px; background: var(--border-strong); margin: 4px 2px; }
 
         /* ── Tab views ──────────────────────────────────── */
         .main-content { min-height: 0; padding: 20px 28px 24px; }
@@ -359,16 +379,6 @@
         .process-btn:hover:not(:disabled)::after { transform: translateX(100%); }
         .process-btn:disabled { background: var(--surface-3); color: var(--text-3); cursor: not-allowed; box-shadow: none; }
 
-        .capture-tips {
-            display: flex;
-            justify-content: center;
-            gap: 22px;
-            font-size: 0.76em;
-            color: var(--text-3);
-            flex-wrap: wrap;
-        }
-        .capture-tips span { display: inline-flex; align-items: center; gap: 6px; }
-        .capture-tips svg { width: 12px; height: 12px; color: var(--accent); flex-shrink: 0; }
 
         /* ── SETTINGS tab ───────────────────────────────── */
         .settings-wrap {
@@ -426,6 +436,17 @@
             box-shadow: 0 0 10px rgba(129, 140, 248, 0.5);
         }
         .preset-option input[type="radio"]:disabled { opacity: .4; cursor: not-allowed; }
+        .mode-banner {
+            margin-top: 14px; padding: 10px 14px; border-radius: 10px;
+            background: var(--surface-2); border: 1px solid var(--border-strong);
+            font-size: 13px; line-height: 1.45;
+        }
+        .mode-banner strong { color: var(--text); }
+        .fbx-toggle {
+            display: flex; align-items: flex-start; gap: 9px; margin-top: 12px;
+            font-size: 13px; line-height: 1.4; cursor: pointer;
+        }
+        .fbx-toggle input { margin-top: 2px; }
         .po-name { font-weight: 600; font-size: 0.9em; letter-spacing: -0.01em; display: block; margin-bottom: 3px; padding-right: 20px; }
         .po-desc { color: var(--text-2); font-size: 0.74em; line-height: 1.45; display: block; }
 
@@ -830,7 +851,6 @@
 
             <div class="tab-bar" role="tablist">
                 <button class="tab-btn active" id="tabBtn-create" onclick="switchTab('create')" role="tab">Create</button>
-                <button class="tab-btn" id="tabBtn-settings" onclick="switchTab('settings')" role="tab">Settings</button>
                 <button class="tab-btn" id="tabBtn-process" onclick="switchTab('process')" role="tab">
                     Process <span class="tab-dot" id="processTabDot"></span>
                 </button>
@@ -841,22 +861,30 @@
 
             <div class="header-actions">
                 <input type="file" id="splatFileInput" accept=".ply,.splat" style="display:none" onchange="openSplatFile(this)">
-                <button onclick="document.getElementById('splatFileInput').click()" class="header-btn">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
-                    Open Splat
-                </button>
-                <a href="/logs" target="_blank" class="header-btn">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-                    Logs
-                </a>
-                <button onclick="killAllProcesses()" class="header-btn danger">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-                    Stop
-                </button>
-                <button onclick="cleanupJobs()" class="header-btn danger">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m1 0v14a2 2 0 01-2 2H8a2 2 0 01-2-2V6"/></svg>
-                    Clean
-                </button>
+                <div class="menu-wrap">
+                    <button class="header-btn menu-btn" id="hamburgerBtn" onclick="toggleHeaderMenu(event)" aria-label="Menu" aria-haspopup="true" aria-expanded="false">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+                    </button>
+                    <div class="menu-dropdown" id="headerMenu" role="menu">
+                        <button class="menu-item" role="menuitem" onclick="closeHeaderMenu(); document.getElementById('splatFileInput').click()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+                            Open Splat
+                        </button>
+                        <a class="menu-item" role="menuitem" href="/logs" target="_blank" onclick="closeHeaderMenu()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+                            Logs
+                        </a>
+                        <div class="menu-sep"></div>
+                        <button class="menu-item danger" role="menuitem" onclick="closeHeaderMenu(); killAllProcesses()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                            Stop
+                        </button>
+                        <button class="menu-item danger" role="menuitem" onclick="closeHeaderMenu(); cleanupJobs()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m1 0v14a2 2 0 01-2 2H8a2 2 0 01-2-2V6"/></svg>
+                            Clean
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -885,6 +913,26 @@
 
                     <div class="file-list" id="fileList"></div>
 
+                    <!-- Auto-detected input mode banner -->
+                    <div id="modeBanner" class="mode-banner" style="display:none;"></div>
+
+                    <!-- Draft / Production — shown for image sequences & video (hidden for single image → ML-Sharp) -->
+                    <div id="qualityCards" class="set-group" style="display:none;margin-top:14px;">
+                        <div class="set-label">Quality</div>
+                        <div class="opt-grid c2">
+                            <label class="preset-option">
+                                <input type="radio" name="quality" value="draft" id="qualityDraft">
+                                <span class="po-name"><span class="tint green"></span>Draft</span>
+                                <span class="po-desc">Fast Brush splat — quick, still good</span>
+                            </label>
+                            <label class="preset-option">
+                                <input type="radio" name="quality" value="production" id="qualityProduction" checked>
+                                <span class="po-name"><span class="tint violet"></span>Production</span>
+                                <span class="po-desc">Highest quality — MCMC + Brush combine</span>
+                            </label>
+                        </div>
+                    </div>
+
                     <!-- Video-only controls — shown automatically when a video file is detected -->
                     <div id="videoControls" class="video-controls-box">
                         <div class="vc-label">Video Settings</div>
@@ -906,9 +954,12 @@
                                 </select>
                             </div>
                         </div>
+                        <label class="fbx-toggle">
+                            <input type="checkbox" id="fbxMatchmove">
+                            <span><strong>Export FBX matchmove camera</strong> — solves every frame for VFX. Caps at ~300 frames / ~30s.</span>
+                        </label>
                     </div>
 
-                    <div class="summary-row" id="settingsSummary" title="Click to edit in Settings"></div>
 
                     <button class="process-btn" id="processBtn" onclick="startProcessing()" disabled>
                         Start Processing
@@ -916,12 +967,6 @@
 
                     <div class="error" id="errorMsg" role="alert"></div>
 
-                    <div class="capture-tips">
-                        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>Orbit the subject</span>
-                        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/></svg>60–80% overlap</span>
-                        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>Even lighting</span>
-                        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-10 4 6 2-3 4 7z"/></svg>Texture over gloss</span>
-                    </div>
                 </div>
             </section>
 
@@ -1230,6 +1275,7 @@
         /* ── Settings summary chips on Create tab ───────── */
         function updateSettingsSummary() {
             const wrap = document.getElementById('settingsSummary');
+            if (!wrap) return;   // summary row removed — Draft/Production is the visible control now
             const method = document.querySelector('input[name="method"]:checked').value;
             const chips = [];
             if (method === 'mlsharp') {
@@ -1263,6 +1309,24 @@
         document.getElementById('mlsharpDevice').addEventListener('change', updateSettingsSummary);
 
         fileInput.addEventListener('change', handleFiles);
+        document.querySelectorAll('input[name="quality"]').forEach(r => r.addEventListener('change', applyQuality));
+        document.getElementById('fbxMatchmove').addEventListener('change', applyFbxToggle);
+
+        // Header hamburger menu (Open Splat / Logs / Stop / Clean)
+        function toggleHeaderMenu(e) {
+            e.stopPropagation();
+            const open = document.getElementById('headerMenu').classList.toggle('open');
+            document.getElementById('hamburgerBtn').setAttribute('aria-expanded', open);
+        }
+        function closeHeaderMenu() {
+            document.getElementById('headerMenu').classList.remove('open');
+            document.getElementById('hamburgerBtn').setAttribute('aria-expanded', 'false');
+        }
+        document.addEventListener('click', (e) => {
+            const wrap = document.querySelector('.menu-wrap');
+            if (wrap && !wrap.contains(e.target)) closeHeaderMenu();
+        });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHeaderMenu(); });
 
         uploadSection.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -1416,9 +1480,61 @@
             displayFileList();
             updateTimeEstimates();
             processBtn.disabled = selectedFiles.length === 0;
+            applyInputRouting();
+        }
 
-            const hasVideo = selectedFiles.some(f => f.type.startsWith('video/') || f.name.match(/\.(mp4|avi|mov|mkv|webm)$/i));
-            document.getElementById('videoControls').style.display = hasVideo ? 'block' : 'none';
+        // Route the UI by what was dropped: single image -> ML-Sharp; sequence/ZIP -> Draft/Production; video -> + sampling/FBX.
+        function applyInputRouting() {
+            const isVid = f => f.type.startsWith('video/') || /\.(mp4|avi|mov|mkv|webm)$/i.test(f.name);
+            const isZip = f => /\.zip$/i.test(f.name);
+            const isImg = f => f.type.startsWith('image/') || /\.(jpe?g|png|webp|heic|tiff?)$/i.test(f.name);
+            const vids = selectedFiles.filter(isVid);
+            const zips = selectedFiles.filter(isZip);
+            const imgs = selectedFiles.filter(isImg);
+
+            const banner = document.getElementById('modeBanner');
+            const qcards = document.getElementById('qualityCards');
+            document.getElementById('videoControls').style.display = vids.length > 0 ? 'block' : 'none';
+
+            if (selectedFiles.length === 0) {
+                banner.style.display = 'none'; qcards.style.display = 'none'; return;
+            }
+
+            const singleImage = imgs.length === 1 && vids.length === 0 && zips.length === 0;
+            if (singleImage) {
+                document.getElementById('methodMLSharp').checked = true;
+                qcards.style.display = 'none';
+                banner.style.display = 'block';
+                banner.innerHTML = '<strong>Single image → ML-Sharp.</strong> Instant AI splat from one photo — no quality choice needed.';
+                if (typeof updateSettingsSummary === 'function') updateSettingsSummary();
+            } else {
+                document.getElementById('methodTraditional').checked = true;
+                qcards.style.display = 'block';
+                banner.style.display = 'block';
+                const what = vids.length ? 'Video' : (zips.length ? 'ZIP archive' : imgs.length + ' images');
+                banner.innerHTML = `<strong>${what} → reconstruction.</strong> Pick Draft (fast) or Production (highest quality) below.`;
+                applyQuality();
+            }
+        }
+
+        // Draft/Production drive the existing (advanced) trainer + preset fields, so the backend contract is unchanged.
+        function applyQuality() {
+            const prod = document.getElementById('qualityProduction').checked;
+            // Draft = fast Brush; Production = high MCMC (interim until the MCMC+Brush combine pipeline is wired in).
+            const trainer = document.querySelector(`input[name="trainer"][value="${prod ? 'mcmc' : 'brush'}"]`);
+            if (trainer) trainer.checked = true;
+            const preset = document.querySelector(`input[name="preset"][value="${prod ? 'high' : 'medium'}"]`);
+            if (preset) preset.checked = true;
+            if (typeof updateSettingsSummary === 'function') updateSettingsSummary();
+        }
+
+        // FBX matchmove camera -> solve every frame, capped for GPU.
+        function applyFbxToggle() {
+            const on = document.getElementById('fbxMatchmove').checked;
+            const interval = document.getElementById('interval');
+            interval.value = on ? '1' : interval.value;
+            interval.disabled = on;
+            if (on) document.getElementById('maxFrames').value = '500';
         }
 
         function displayFileList() {
@@ -1519,6 +1635,8 @@
                 formData.append('mvs_quality_mode', 'balanced');
                 formData.append('interval', document.getElementById('interval').value);
                 formData.append('max_frames', document.getElementById('maxFrames').value);
+                formData.append('export_fbx', document.getElementById('fbxMatchmove').checked ? 'true' : 'false');
+                formData.append('quality', document.querySelector('input[name="quality"]:checked')?.value || 'production');
             }
 
             try {
