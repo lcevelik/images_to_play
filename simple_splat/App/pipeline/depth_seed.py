@@ -41,7 +41,7 @@ def _voxel_downsample(xyz, rgb, voxel):
 
 
 def depth_seed(parent_dir, out_ply, stride=8, model='small', merge_sparse=True,
-               far_mult=3.0, device='cuda', progress=print):
+               far_mult=3.0, gap_mult=0.0, device='cuda', progress=print):
     import torch
     from PIL import Image
     import pycolmap
@@ -148,6 +148,21 @@ def depth_seed(parent_dir, out_ply, stride=8, model='small', merge_sparse=True,
     xyz, rgb = _voxel_downsample(xyz, rgb, voxel)
     progress(f"[depth-seed] {len(xyz):,} after voxel downsample (voxel={voxel:.4f})")
 
+    # GAP-FILL: drop depth points near existing sparse SfM points (those surfaces
+    # already have clean geometry — overwriting them with noisy monocular depth makes
+    # them wavy). Keep ONLY depth points in textureless gaps far from any sparse point.
+    if gap_mult and gap_mult > 0:
+        from scipy.spatial import cKDTree
+        stree = cKDTree(all_sp)
+        dnn, _ = stree.query(all_sp, k=2)
+        sp_spacing = float(np.median(dnn[:, 1]))
+        thresh = sp_spacing * gap_mult
+        d2sparse, _ = stree.query(xyz)
+        keep = d2sparse > thresh
+        progress(f"[depth-seed] gap-fill: sparse_spacing={sp_spacing:.3f}, keep depth dist>{thresh:.3f} "
+                 f"-> {int(keep.sum()):,}/{len(xyz):,} depth points (dropped {int((~keep).sum()):,} on covered surfaces)")
+        xyz, rgb = xyz[keep], rgb[keep]
+
     if merge_sparse:
         sp_rgb = np.array([p.color for p in recon.points3D.values()], dtype=np.uint8)
         xyz = np.concatenate([xyz, all_sp])
@@ -157,6 +172,57 @@ def depth_seed(parent_dir, out_ply, stride=8, model='small', merge_sparse=True,
     _write_points_ply(out_ply, xyz, rgb)
     progress(f"[depth-seed] -> {out_ply}")
     return out_ply
+
+
+def build_dense_seed_dir(parent_dir, out_dir, gap_mult=12.0, stride=8, model='small', progress=print):
+    """Run gap-fill depth-seed on a COLMAP scene (parent_dir with sparse/0 + images)
+    and write a new COLMAP dir (out_dir) with the SAME cameras/poses but a dense
+    points3D.bin (sparse SfM + gap-filled depth). Ready for train_mcmc / Brush.
+
+    Returns out_dir. Consolidates the manual seed -> points3D.bin steps.
+    """
+    import shutil
+    import struct
+    import pycolmap
+
+    seed_ply = os.path.join(out_dir, '_depthseed.ply')
+    os.makedirs(out_dir, exist_ok=True)
+    depth_seed(parent_dir, seed_ply, stride=stride, model=model, gap_mult=gap_mult, progress=progress)
+
+    # COLMAP dir: copy cameras/poses (everything but points3D), write dense points3D.bin
+    src_sparse = os.path.join(parent_dir, 'sparse', '0')
+    dst_sparse = os.path.join(out_dir, 'sparse', '0')
+    os.makedirs(dst_sparse, exist_ok=True)
+    for fn in os.listdir(src_sparse):
+        if fn != 'points3D.bin':
+            shutil.copy2(os.path.join(src_sparse, fn), os.path.join(dst_sparse, fn))
+
+    with open(seed_ply, 'rb') as f:
+        hdr = b''
+        while b'end_header\n' not in hdr:
+            hdr += f.read(1)
+        n = int([l for l in hdr.decode().splitlines() if l.startswith('element vertex')][0].split()[-1])
+        P = np.frombuffer(f.read(n * 15), dtype=np.dtype(
+            [('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('r', 'u1'), ('g', 'u1'), ('b', 'u1')]))
+    dt = np.dtype([('id', '<u8'), ('x', '<f8'), ('y', '<f8'), ('z', '<f8'),
+                   ('r', 'u1'), ('g', 'u1'), ('b', 'u1'), ('err', '<f8'), ('tl', '<u8')])
+    o = np.empty(n, dtype=dt)
+    o['id'] = np.arange(1, n + 1)
+    o['x'], o['y'], o['z'] = P['x'], P['y'], P['z']
+    o['r'], o['g'], o['b'] = P['r'], P['g'], P['b']
+    o['err'] = 1.0
+    o['tl'] = 0
+    with open(os.path.join(dst_sparse, 'points3D.bin'), 'wb') as f:
+        f.write(struct.pack('<Q', n))
+        f.write(o.tobytes())
+
+    # images: point Brush/trainer at the undistorted images
+    src_imgs = os.path.join(parent_dir, 'images')
+    dst_imgs = os.path.join(out_dir, 'images')
+    if os.path.isdir(src_imgs) and not os.path.isdir(dst_imgs):
+        shutil.copytree(src_imgs, dst_imgs)
+    progress(f"[depth-seed] dense COLMAP seed ready: {dst_sparse} ({n:,} points)")
+    return out_dir
 
 
 def _write_points_ply(path, xyz, rgb):
@@ -178,4 +244,5 @@ if __name__ == '__main__':
     parent, outp = sys.argv[1], sys.argv[2]
     stride = int(sys.argv[sys.argv.index('--stride') + 1]) if '--stride' in sys.argv else 8
     model = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'small'
-    depth_seed(parent, outp, stride=stride, model=model)
+    gap_mult = float(sys.argv[sys.argv.index('--gap-mult') + 1]) if '--gap-mult' in sys.argv else 0.0
+    depth_seed(parent, outp, stride=stride, model=model, gap_mult=gap_mult)

@@ -622,7 +622,34 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         # Count images
         image_files = [f for f in os.listdir(image_path) if f.lower().endswith(IMAGE_EXTENSIONS)]
         add_log(f"Found {len(image_files)} images to process", "INFO")
-        
+
+        # ── Draft / Production recipe orchestrators ──────────────────────────────
+        # quality='draft'|'production' runs our validated pipelines (learned-SfM →
+        # depth-seed/undistort → trainer(s) → combine/compress), bypassing the legacy
+        # COLMAP-SIFT + single-trainer flow. Any error falls through to that legacy path.
+        _quality = (advanced_settings or {}).get('quality')
+        if _quality in ('draft', 'production'):
+            try:
+                # Spawn the recipe as a DETACHED process that writes status/output to the
+                # job dir. It runs independently of the Flask server, so a server restart
+                # or crash never orphans the job (status is read back from recipe_status.json).
+                import sys as _sys
+                _recipes_py = os.path.join(_APP_DIR, 'pipeline', 'recipes.py')
+                _job_dir = os.path.dirname(image_path)
+                _spawn_log = open(os.path.join(_job_dir, 'recipe_spawn.log'), 'w')
+                _flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == 'nt' else 0
+                subprocess.Popen([_sys.executable, _recipes_py, _quality, image_path, _job_dir],
+                                 stdout=_spawn_log, stderr=subprocess.STDOUT,
+                                 creationflags=_flags, close_fds=True)
+                add_log(f"[RECIPE] {_quality.upper()} pipeline launched (detached — survives server restarts)", "INFO")
+                processing_status[job_id]['step'] = f'{_quality.title()} pipeline starting...'
+                processing_status[job_id]['status'] = 'processing'
+                processing_status[job_id]['is_recipe'] = True
+                _save_job_status(job_id)
+                return
+            except Exception as _re:
+                add_log(f"[RECIPE] launch failed ({_re}) — falling back to legacy flow", "WARNING")
+
         # Import and run the glomap processing
         from pipeline.run_glomap import run_colmap, set_progress_callback
         
@@ -1895,6 +1922,7 @@ def upload_files():
         'mvs_quality_mode': mvs_mode,
         'trainer': trainer_choice,
         'mcmc_cap': mcmc_cap,
+        'quality': request.form.get('quality'),  # 'draft' | 'production' -> recipe orchestrator
     }
 
     # Apply sharpness boost
@@ -1945,6 +1973,22 @@ def get_status(job_id):
         else:
             return jsonify({'error': 'Job not found'}), 404
     
+    # Detached recipe jobs write their progress to recipe_status.json (they run in a
+    # separate process, so processing_status isn't updated in-memory). Overlay it.
+    if processing_status[job_id].get('is_recipe'):
+        try:
+            _rs_path = os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'recipe_status.json')
+            if os.path.exists(_rs_path):
+                with open(_rs_path) as _f:
+                    _rs = json.load(_f)
+                processing_status[job_id]['step'] = _rs.get('step', processing_status[job_id].get('step'))
+                processing_status[job_id]['progress'] = _rs.get('progress', processing_status[job_id].get('progress'))
+                processing_status[job_id]['status'] = _rs.get('status', processing_status[job_id].get('status'))
+                if _rs.get('ply_path'):
+                    processing_status[job_id]['ply_path'] = _rs['ply_path']
+        except Exception:
+            pass
+
     # Keep the running stage's elapsed current (server-side, no client clock skew)
     _now = time.time()
     for _st in processing_status[job_id].get('stages', {}).values():
