@@ -1994,6 +1994,17 @@ def get_status(job_id):
                 if not processing_status[job_id].get('preview_ready') and os.path.exists(
                         os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'alignment.json')):
                     processing_status[job_id]['preview_ready'] = True
+                # surface the detached recipe's own log in the app /logs stream (it runs in a
+                # separate process, so add_log() never saw it). Ingest new lines incrementally.
+                _rlog = os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'recipe.log')
+                if os.path.exists(_rlog):
+                    _off = processing_status[job_id].get('_recipe_log_off', 0)
+                    with open(_rlog, errors='ignore') as _lf:
+                        _lines = _lf.read().splitlines()
+                    for _ln in _lines[_off:]:
+                        if _ln.strip():
+                            add_log(_ln.strip(), "INFO")
+                    processing_status[job_id]['_recipe_log_off'] = len(_lines)
                 # when the recipe completes, freeze all stage timers
                 if _rs.get('status') == 'completed':
                     for _st in processing_status[job_id].get('stages', {}).values():
