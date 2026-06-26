@@ -638,8 +638,10 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 _job_dir = os.path.dirname(image_path)
                 _spawn_log = open(os.path.join(_job_dir, 'recipe_spawn.log'), 'w')
                 _flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == 'nt' else 0
-                subprocess.Popen([_sys.executable, _recipes_py, _quality, image_path, _job_dir],
-                                 stdout=_spawn_log, stderr=subprocess.STDOUT,
+                _cmd = [_sys.executable, _recipes_py, _quality, image_path, _job_dir]
+                if (advanced_settings or {}).get('export_fbx'):
+                    _cmd.append('--fbx')
+                subprocess.Popen(_cmd, stdout=_spawn_log, stderr=subprocess.STDOUT,
                                  creationflags=_flags, close_fds=True)
                 add_log(f"[RECIPE] {_quality.upper()} pipeline launched (detached — survives server restarts)", "INFO")
                 processing_status[job_id]['step'] = f'{_quality.title()} pipeline starting...'
@@ -1923,6 +1925,7 @@ def upload_files():
         'trainer': trainer_choice,
         'mcmc_cap': mcmc_cap,
         'quality': request.form.get('quality'),  # 'draft' | 'production' -> recipe orchestrator
+        'export_fbx': request.form.get('export_fbx', 'false').lower() == 'true',  # FBX matchmove camera
     }
 
     # Apply sharpness boost
@@ -1986,6 +1989,8 @@ def get_status(job_id):
                 processing_status[job_id]['status'] = _rs.get('status', processing_status[job_id].get('status'))
                 if _rs.get('ply_path'):
                     processing_status[job_id]['ply_path'] = _rs['ply_path']
+                if _rs.get('fbx'):
+                    processing_status[job_id]['fbx'] = True   # FBX matchmove camera available to download
                 # drive the UI stage timers from the recipe's current stage
                 _rstage = _rs.get('stage')
                 if _rstage and _rstage in processing_status[job_id].get('stages', {}):

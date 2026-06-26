@@ -1207,6 +1207,9 @@
                                     <a href="#" class="result-btn btn-primary" id="viewBtn" target="_blank">
                                         View in 3D Viewer
                                     </a>
+                                    <a href="#" class="result-btn" id="fbxBtn" style="display:none; margin-top:8px;" download>
+                                        ⬇ Download FBX Camera
+                                    </a>
                                 </div>
                             </div>
 
@@ -1827,7 +1830,7 @@
                     setTabDot('process', '');
                     setTabDot('results', 'done');
                     notifyJobDone(true, 'Your Gaussian splat is ready to view.');
-                    showResults();
+                    showResults(data);
                     switchTab('results');
                 } else if (data.status === 'error') {
                     showError(data.error || 'Processing failed');
@@ -2019,10 +2022,18 @@
             }
         }
 
-        function showResults() {
+        function showResults(data) {
             document.getElementById('resultsEmpty').style.display = 'none';
             resultSection.classList.add('active');
             document.getElementById('viewBtn').href = `/static/supersplat/index.html?load=/ply/${currentJobId}.ply`;
+            // FBX matchmove camera (auto-exported by the recipe when the toggle was on)
+            const fbxBtn = document.getElementById('fbxBtn');
+            if (data && data.fbx) {
+                fbxBtn.href = `/download/${currentJobId}/tracking/cameras.fbx`;
+                fbxBtn.style.display = 'inline-block';
+            } else {
+                fbxBtn.style.display = 'none';
+            }
         }
 
         async function exportCameraTracking() {
