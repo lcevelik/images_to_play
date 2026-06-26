@@ -148,16 +148,37 @@ def run_production(images_dir, job_dir, status_cb, log):
     status_cb("Undistorting...", 10, "mapping")
     scene = _undistort(images_dir, sparse, job_dir, log)
 
-    status_cb("MCMC training (~2 hr)...", 15, "training")
+    # Train MCMC and Brush IN PARALLEL — they're independent (same seed) and fit in 48 GB
+    # together (~14 GB each on the RTX 8000), so wall-clock ~halves vs sequential (~4 hr -> ~2.5 hr).
+    # Each runs as its own GPU subprocess; threads here just wait on them concurrently.
+    import threading
+    status_cb("Training MCMC + Brush in parallel (~2.5 hr)...", 15, "training")
     mcmc = os.path.join(job_dir, "mcmc", "gaussian_splat.ply")
     os.makedirs(os.path.dirname(mcmc), exist_ok=True)
-    _py(f"from pipeline.gsplat_mcmc_trainer import train_mcmc\n"
-        f"train_mcmc(r'{scene}', total_steps=30000, cap_max=4000000, sh_degree=3, use_lpips=True,\n"
-        f"           strategy_name='mcmc', export_opacity_min=0.03, output_ply_path=r'{mcmc}')", log, timeout=18000)
+    errors, brush_holder = {}, {}
 
-    status_cb("Brush training (~2 hr)...", 55, "training")
-    brush_export = _brush(scene, os.path.join(job_dir, "brush"), steps=30000, res=3968,
-                          growth_stop=15000, log=log, timeout=18000)
+    def _train_mcmc():
+        try:
+            _py(f"from pipeline.gsplat_mcmc_trainer import train_mcmc\n"
+                f"train_mcmc(r'{scene}', total_steps=30000, cap_max=4000000, sh_degree=3, use_lpips=True,\n"
+                f"           strategy_name='mcmc', export_opacity_min=0.03, output_ply_path=r'{mcmc}')",
+                log, timeout=18000)
+        except Exception as e:
+            errors['mcmc'] = e
+
+    def _train_brush():
+        try:
+            brush_holder['ply'] = _brush(scene, os.path.join(job_dir, "brush"), steps=30000,
+                                         res=3968, growth_stop=15000, log=log, timeout=18000)
+        except Exception as e:
+            errors['brush'] = e
+
+    t_mcmc, t_brush = threading.Thread(target=_train_mcmc), threading.Thread(target=_train_brush)
+    t_mcmc.start(); t_brush.start()
+    t_mcmc.join(); t_brush.join()
+    if errors:
+        raise RuntimeError("parallel training failed — " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
+    brush_export = brush_holder['ply']
 
     status_cb("Combining (sigma=1.7)...", 95, "training")
     combined = os.path.join(job_dir, "combined.ply")
