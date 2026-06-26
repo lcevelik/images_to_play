@@ -25,12 +25,26 @@ COLMAP = next((p for p in (r"C:\COLMAP\bin\colmap.exe", "colmap") if os.path.exi
 BRUSH = next((p for p in (r"C:\Brush\brush_app.exe",
                           os.path.join(APP_DIR, "Brush", "brush_app.exe")) if os.path.exists(p)), None)
 
+# Suppress console/GUI pop-up windows for every spawned subprocess (Windows).
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+
+
+def _hidden_si():
+    """STARTUPINFO that hides a child's window (used for the Brush GUI binary)."""
+    if os.name != 'nt':
+        return None
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0  # SW_HIDE
+    return si
+
 
 def _run(cmd, log, cwd=APP_DIR, timeout=None):
     """Run a subprocess, streaming stdout to log(). Raises on non-zero exit."""
     log(f"$ {' '.join(str(c) for c in cmd)}", "DEBUG")
     p = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         text=True, bufsize=1, env=os.environ.copy())
+                         text=True, bufsize=1, env=os.environ.copy(),
+                         creationflags=_NO_WINDOW, startupinfo=_hidden_si())
     start = time.time()
     for line in p.stdout:
         line = line.rstrip()
@@ -102,7 +116,8 @@ def _brush(seed_dir, out_dir, steps, res, growth_stop, log, timeout=14400):
            "--export-path", out_dir, "--export-name", "export_{iter}.ply",
            "--export-every", str(max(2000, steps // 4))]
     log(f"$ {' '.join(cmd)}", "DEBUG")
-    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=_NO_WINDOW, startupinfo=_hidden_si())
     start = time.time()
     stall_secs = 900           # if no NEW export for 15 min, salvage instead of hanging
     last_export_count, last_progress_t = 0, time.time()
