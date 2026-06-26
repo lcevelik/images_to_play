@@ -20,6 +20,8 @@ import struct
 import subprocess
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)  # so direct `import pipeline.X` works when run as a script
 PY = sys.executable
 COLMAP = next((p for p in (r"C:\COLMAP\bin\colmap.exe", "colmap") if os.path.exists(p) or p == "colmap"), "colmap")
 BRUSH = next((p for p in (r"C:\Brush\brush_app.exe",
