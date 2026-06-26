@@ -48,11 +48,35 @@ def _py(code, log, timeout=None):
     _run([PY, "-c", f"import sys; sys.path.insert(0, r'{APP_DIR}')\n{code}"], log, timeout=timeout)
 
 
-def _learned_sfm(images_dir, job_dir, log):
+def _learned_sfm(images_dir, job_dir, log, status_cb=None):
     seed = os.path.join(job_dir, "seed")
+    _seen = {'s': None}
+
+    def _slog(line, lvl="INFO"):
+        log(line, lvl)
+        if not status_cb:
+            return
+        # drive the UI stage timers from learned-SfM's own phase output (debounced)
+        if "extracted" in line and _seen['s'] != 'fe':
+            _seen['s'] = 'fe'; status_cb("Feature extraction...", 6, "feature_extraction")
+        elif "matched through" in line and _seen['s'] != 'fm':
+            _seen['s'] = 'fm'; status_cb("Feature matching...", 9, "feature_matching")
+        elif ("Registering image" in line or "Retriangulation" in line) and _seen['s'] != 'mp':
+            _seen['s'] = 'mp'; status_cb("3D mapping...", 12, "mapping")
+
     _run([PY, os.path.join(APP_DIR, "pipeline", "learned_sfm.py"),
-          "-i", images_dir, "-o", seed, "--device", "cuda", "--max-kpts", "4096"], log, timeout=1800)
+          "-i", images_dir, "-o", seed, "--device", "cuda", "--max-kpts", "4096"], _slog, timeout=1800)
     return os.path.join(seed, "sparse", "0")
+
+
+def _build_preview(scene, job_dir, log):
+    """Write the 3D alignment preview (sparse points + camera frustums) for the Process tab."""
+    try:
+        from pipeline.sparse_preview import build_alignment_json
+        build_alignment_json(os.path.join(scene, "sparse", "0"), os.path.join(job_dir, "alignment.json"))
+        log("alignment preview written", "INFO")
+    except Exception as e:
+        log(f"alignment preview failed: {e}", "WARNING")
 
 
 def _undistort(images_dir, sparse_dir, job_dir, log):
@@ -119,11 +143,12 @@ def run_draft(images_dir, job_dir, status_cb, log):
     """~10 min: gap-fill dense seed -> one fast Brush pass. Writes job_dir/gaussian_splat.ply."""
     out_ply = os.path.join(job_dir, "gaussian_splat.ply")
 
-    status_cb("Learned-SfM (sparse seed)...", 8, "mapping")
-    sparse = _learned_sfm(images_dir, job_dir, log)
+    status_cb("Feature extraction...", 5, "feature_extraction")
+    sparse = _learned_sfm(images_dir, job_dir, log, status_cb)
 
     status_cb("Undistorting...", 18, "mapping")
     scene = _undistort(images_dir, sparse, job_dir, log)
+    _build_preview(scene, job_dir, log)   # sparse point cloud preview for the Process tab
 
     status_cb("Depth-seeding (gap-fill)...", 25, "mapping")
     dense = os.path.join(job_dir, "scene-dense")
@@ -142,11 +167,12 @@ def run_production(images_dir, job_dir, status_cb, log):
     """~4 hr: MCMC + Brush + combine(sigma=1.7) + compress. Writes job_dir/gaussian_splat.ply."""
     out_ply = os.path.join(job_dir, "gaussian_splat.ply")
 
-    status_cb("Learned-SfM (sparse seed)...", 5, "mapping")
-    sparse = _learned_sfm(images_dir, job_dir, log)
+    status_cb("Feature extraction...", 4, "feature_extraction")
+    sparse = _learned_sfm(images_dir, job_dir, log, status_cb)
 
     status_cb("Undistorting...", 10, "mapping")
     scene = _undistort(images_dir, sparse, job_dir, log)
+    _build_preview(scene, job_dir, log)   # sparse point cloud preview for the Process tab
 
     # Train MCMC and Brush IN PARALLEL — they're independent (same seed) and fit in 48 GB
     # together (~14 GB each on the RTX 8000), so wall-clock ~halves vs sequential (~4 hr -> ~2.5 hr).

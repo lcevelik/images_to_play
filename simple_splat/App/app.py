@@ -1986,6 +1986,19 @@ def get_status(job_id):
                 processing_status[job_id]['status'] = _rs.get('status', processing_status[job_id].get('status'))
                 if _rs.get('ply_path'):
                     processing_status[job_id]['ply_path'] = _rs['ply_path']
+                # drive the UI stage timers from the recipe's current stage
+                _rstage = _rs.get('stage')
+                if _rstage and _rstage in processing_status[job_id].get('stages', {}):
+                    transition_stage(processing_status, job_id, _rstage)
+                # the sparse point-cloud preview becomes available once alignment.json is written
+                if not processing_status[job_id].get('preview_ready') and os.path.exists(
+                        os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'alignment.json')):
+                    processing_status[job_id]['preview_ready'] = True
+                # when the recipe completes, freeze all stage timers
+                if _rs.get('status') == 'completed':
+                    for _st in processing_status[job_id].get('stages', {}).values():
+                        if _st.get('status') == 'running':
+                            _st['status'] = 'complete'
         except Exception:
             pass
 
