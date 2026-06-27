@@ -322,7 +322,24 @@ def _export_gltf_manual(poses, output_path, fps=30):
     return output_path
 
 
-def export_camera_fbx(poses, output_path, fps=30):
+def video_frame_timing(job_dir, num_poses):
+    """For a video-derived job, return (fps, frame_numbers) from <job_dir>/video_info.json
+    (written during frame extraction) so an exported camera matches the SOURCE video's frame
+    rate, with keyframes on their original source-frame numbers. Returns (None, None) when the
+    job was not a video or the info is missing/invalid (caller then keeps its default fps)."""
+    try:
+        with open(os.path.join(job_dir, 'video_info.json')) as f:
+            info = json.load(f)
+        fps = float(info.get('source_fps') or 0)
+        interval = max(1, int(info.get('frame_interval') or 1))
+        if fps <= 0:
+            return None, None
+        return fps, [i * interval for i in range(num_poses)]
+    except Exception:
+        return None, None
+
+
+def export_camera_fbx(poses, output_path, fps=30, frame_numbers=None):
     """Export camera animation as a **binary** FBX 7.4 (FBX 2013) file.
 
     Binary (not ASCII) because Blender's importer rejects ASCII FBX outright;
@@ -339,7 +356,7 @@ def export_camera_fbx(poses, output_path, fps=30):
         from fbx_binary import write_camera_fbx
     except ImportError:
         from pipeline.fbx_binary import write_camera_fbx
-    return write_camera_fbx(poses, output_path, fps)
+    return write_camera_fbx(poses, output_path, fps, frame_numbers)
 
 
 def _export_fbx_ascii(poses, output_path, fps=30):

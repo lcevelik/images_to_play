@@ -23,6 +23,8 @@ app.py                  <- Web server + job orchestrator (entry point)
   |
   +-- camera_tracking.py       <- Camera path export: FBX / GLTF / JSON / Blender script
   |
+  +-- fbx_binary.py            <- Minimal binary FBX 7.4 writer (animated camera) used by camera_tracking
+  |
   +-- batch_processing.py      <- Batch job queue (routes registered at startup)
 
 test_mcmc_smoke.py      <- Standalone GPU smoke test for gsplat_mcmc_trainer (not imported by app)
@@ -371,11 +373,22 @@ Low-level PLY writer. Writes an ASCII PLY file from a list of `[x, y, z]` points
 |----------|--------|
 | `export_camera_json(poses, path, fps)` | `cameras.json` |
 | `export_camera_gltf(poses, path, fps)` | `cameras.gltf` (animated camera) |
-| `export_camera_fbx(poses, path, fps)` | `cameras.fbx` (ASCII FBX) |
+| `export_camera_fbx(poses, path, fps, frame_numbers=None)` | `cameras.fbx` (**binary FBX 7.4** via `fbx_binary.py`) |
+| `video_frame_timing(job_dir, num_poses)` | `(fps, frame_numbers)` from `video_info.json` (video jobs) |
 | Blender export | `import_camera.py` script |
 | Optional point cloud | `sparse_cloud.ply` |
 
 Downloads served from `/download/<job_id>/tracking/<file>`.
+
+### `fbx_binary.py` — binary FBX 7.4 camera writer
+
+`write_camera_fbx(poses, path, fps=30, frame_numbers=None)` emits a binary FBX 7.4 (FBX 2013) animated camera. Hard-won conventions (all **Blender-headless-verified**; ASCII FBX is rejected by Blender outright, so binary is mandatory):
+- **Object names** are binary `Name\x00\x01Class` (via `_objname()`), NOT ASCII `Class::Name` — the literal `::` form crashes importers.
+- **Units:** `UnitScaleFactor=100` declares metres so the camera imports **1:1 with the splat PLY** (FBX is cm-native → otherwise 100× too small).
+- **Axes:** declared Blender-native Z-up (no reorientation, stays in the COLMAP/splat frame). FBX cameras aim down local **+X**, so `_CAM_LOOK_FLIP` re-aims COLMAP's +Z look without moving the camera (universal across Blender/Maya/Max/Nuke).
+- **Frame rate:** `TimeMode`+`CustomFrameRate` (`_fps_to_timemode()`) declares `fps` so keys land on integer frames. For **video** jobs the export uses the source video's fps with `frame_numbers` on the original source-frame indices (frame-accurate to the plate).
+
+**Verify edits by importing into a real DCC** (`blender --background --factory-startup --python-expr "bpy.ops.import_scene.fbx(...)"`), not by re-parsing our own bytes — the structural self-check (`roundtrip_ok`) validates byte offsets, not name/axis/unit semantics.
 
 ---
 

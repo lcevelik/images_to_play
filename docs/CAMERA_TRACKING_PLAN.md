@@ -4,6 +4,8 @@
 > Source: https://youtube.com/polyfjord
 
 > **STATUS (2026-06-12): core export SHIPPED.** `camera_tracking.py` exports FBX / GLTF / JSON / Blender-script camera paths from any completed job, served via `/api/camera-tracking` with download buttons in the Results tab. The rest of this document is the original research/plan, kept for reference (FFmpeg-based extraction and the full matchmoving workflow remain unimplemented ideas).
+>
+> **UPDATE (2026-06-27): FBX export fixed & Blender-verified.** The FBX is a real **binary FBX 7.4** (`pipeline/fbx_binary.py`) — Section 6's ASCII/SDK plans below are obsolete. Four bugs fixed that had stopped it importing into any DCC: binary object names (`Name\x00\x01Class`), 100× scale (now metre-scale, 1:1 with the splat), ~90° orientation (Z-up axes + FBX +X-aim flip), keyframe timing. **For video jobs the camera now matches the source video's frame rate** with keyframes on the original source-frame numbers (`video_info.json` + `video_frame_timing()`). Verified in Blender 4.3 headless (pos/look/up exact, integer-frame keys).
 
 ---
 

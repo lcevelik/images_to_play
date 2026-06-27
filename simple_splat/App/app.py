@@ -30,7 +30,7 @@ except ImportError:
 
 # Camera tracking
 try:
-    from pipeline.camera_tracking import extract_camera_poses, export_camera_json, export_camera_gltf, export_camera_fbx, export_blender_script, export_point_cloud_ply
+    from pipeline.camera_tracking import extract_camera_poses, export_camera_json, export_camera_gltf, export_camera_fbx, export_blender_script, export_point_cloud_ply, video_frame_timing
     CAMERA_TRACKING_AVAILABLE = True
 except ImportError:
     CAMERA_TRACKING_AVAILABLE = False
@@ -406,7 +406,7 @@ def is_video_file(filename):
     video_extensions = {'mp4', 'mov', 'avi', 'mkv', 'webm'}
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in video_extensions
 
-def extract_frames_from_video(video_path, output_folder, frame_interval=10, max_frames=1000):
+def extract_frames_from_video(video_path, output_folder, frame_interval=10, max_frames=1000, job_dir=None):
     """
     Extract frames from video file.
     
@@ -463,6 +463,18 @@ def extract_frames_from_video(video_path, output_folder, frame_interval=10, max_
         
         cap.release()
         add_log(f"Extracted {extracted_count} frames from video", "INFO")
+
+        # Persist the source frame rate + interval so a matchmove FBX export can match the
+        # video's real frame rate (keys placed on their original source-frame numbers).
+        if job_dir:
+            try:
+                with open(os.path.join(job_dir, 'video_info.json'), 'w') as vf:
+                    json.dump({'source_fps': float(fps),
+                               'frame_interval': int(frame_interval),
+                               'extracted_frames': int(extracted_count)}, vf)
+                add_log(f"Saved video_info.json (source {fps:.3f} fps, interval {frame_interval})", "INFO")
+            except Exception as e:
+                add_log(f"Could not write video_info.json: {e}", "WARNING")
         return extracted_count
         
     except ImportError:
@@ -1834,7 +1846,7 @@ def upload_files():
         max_frames = int(request.form.get('max_frames', 1000))
         
         # Extract frames
-        frame_count = extract_frames_from_video(video_path, images_folder, frame_interval=frame_interval, max_frames=max_frames)
+        frame_count = extract_frames_from_video(video_path, images_folder, frame_interval=frame_interval, max_frames=max_frames, job_dir=job_folder)
         
         if frame_count == 0:
             return jsonify({'error': 'Could not extract frames from video'}), 400
@@ -2214,6 +2226,10 @@ def camera_tracking():
 
     try:
         poses = extract_camera_poses(sparse_dir)
+        # If this job came from a video, match its real frame rate (overrides the query fps).
+        v_fps, fbx_frame_numbers = video_frame_timing(output_path, len(poses))
+        if v_fps:
+            fps = v_fps
         results = {'poses_count': len(poses), 'fps': fps, 'files': []}
 
         if export_format in ('json', 'all'):
@@ -2225,7 +2241,7 @@ def camera_tracking():
             results['files'].append({'format': 'gltf'})
 
         if export_format in ('fbx', 'all'):
-            export_camera_fbx(poses, os.path.join(tracking_dir, 'cameras.fbx'), fps)
+            export_camera_fbx(poses, os.path.join(tracking_dir, 'cameras.fbx'), fps, fbx_frame_numbers)
             results['files'].append({'format': 'fbx'})
 
         if export_format in ('blender', 'all'):

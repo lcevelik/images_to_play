@@ -34,6 +34,34 @@ _FOOTER_MAGIC = bytes([0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e,
                        0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29, 0x0b])
 
 
+def _quat_mul(a, b):
+    """Hamilton product a*b, quaternions as [w,x,y,z]."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return [
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ]
+
+
+# COLMAP cameras look down +Z with +Y down. The FBX standard camera aims down its local
+# +X axis with +Y up (every compliant importer -- Blender/Maya/Max/Nuke -- compensates for
+# this on load), so we map the camera's local axes to: +X -> COLMAP look (+Z), +Y -> up
+# (-Y_colmap), +Z -> right (+X_colmap). That mapping is a 180 deg turn about the (1,0,1)
+# axis = quaternion [0, v, 0, v] with v = sqrt(1/2). Right-multiplying the camera-to-world
+# rotation by it re-aims the camera without moving it, so positions stay COLMAP-frame
+# (matching the splat) and the camera faces correctly in every DCC.
+_SQRT1_2 = math.sqrt(0.5)
+_CAM_LOOK_FLIP = [0.0, _SQRT1_2, 0.0, _SQRT1_2]
+
+
+def _to_dcc_camera_quat(q):
+    """COLMAP camera-to-world quaternion [w,x,y,z] -> DCC camera-orientation quaternion."""
+    return _quat_mul(q, _CAM_LOOK_FLIP)
+
+
 def _quaternion_to_euler_deg(q):
     """[w,x,y,z] -> (X,Y,Z) Euler degrees, XYZ order. Matches the old ASCII path."""
     w, x, y, z = q
@@ -160,6 +188,16 @@ def _uid():
     return _ID[0]
 
 
+def _objname(name, cls):
+    """Binary-FBX object name property: b"Name\\x00\\x01Class".
+
+    Binary FBX joins the object name and its class with a 0x00,0x01 separator
+    (Blender does props[-2].split(b'\\x00\\x01')). This is NOT the ASCII-FBX
+    "Class::Name" form with literal '::' — using that crashes Blender's importer.
+    """
+    return name + "\x00\x01" + cls
+
+
 def _header_extension():
     h = Node("FBXHeaderExtension")
     h.add("FBXHeaderVersion").prop("I", 1003)
@@ -178,18 +216,35 @@ def _header_extension():
     return h
 
 
-def _global_settings():
+def _fps_to_timemode(fps):
+    """Map fps -> (FBX TimeMode enum, custom_rate). Standard rates use their named enum
+    (most compatible); anything else uses eCustom (14) + CustomFrameRate."""
+    named = {120: 1, 100: 2, 60: 3, 50: 4, 48: 5, 30: 6, 25: 10, 24: 11}
+    return (named.get(int(round(fps)), 14), float(fps))
+
+
+def _global_settings(fps=30):
     g = Node("GlobalSettings")
     g.add("Version").prop("I", 1000)
     props = g.add("Properties70")
-    props.p70("UpAxis", "int", "Integer", "", ("I", 1))
+    # Z-up / -Y-forward / X-right == Blender's native axes, so Blender imports with
+    # NO reorientation and the camera stays in the same frame as the (axis-less) splat
+    # PLY. (The old Y-up declaration made Blender rotate everything 90 deg about X.)
+    props.p70("UpAxis", "int", "Integer", "", ("I", 2))
     props.p70("UpAxisSign", "int", "Integer", "", ("I", 1))
-    props.p70("FrontAxis", "int", "Integer", "", ("I", 2))
-    props.p70("FrontAxisSign", "int", "Integer", "", ("I", 1))
+    props.p70("FrontAxis", "int", "Integer", "", ("I", 1))
+    props.p70("FrontAxisSign", "int", "Integer", "", ("I", -1))
     props.p70("CoordAxis", "int", "Integer", "", ("I", 0))
     props.p70("CoordAxisSign", "int", "Integer", "", ("I", 1))
-    props.p70("UnitScaleFactor", "double", "Number", "", ("D", 1.0))
-    props.p70("TimeMode", "enum", "", "", ("I", 0))
+    # 1 file unit = 1 metre. FBX is centimetre-native, so UnitScaleFactor=100 makes a
+    # metre-based DCC (Blender) import positions 1:1 instead of 100x too small.
+    props.p70("UnitScaleFactor", "double", "Number", "", ("D", 100.0))
+    props.p70("OriginalUnitScaleFactor", "double", "Number", "", ("D", 100.0))
+    # Declare the frame rate so keyframes (authored at `fps`) land on integer frames in
+    # the DCC instead of being resampled to the app's default rate.
+    timemode, custom_rate = _fps_to_timemode(fps)
+    props.p70("TimeMode", "enum", "", "", ("I", timemode))
+    props.p70("CustomFrameRate", "double", "Number", "", ("D", custom_rate))
     return g
 
 
@@ -218,7 +273,7 @@ def _definitions(num_curvenodes, num_curves):
 
 def _camera_model(model_id, name, t0, r0, focal_mm):
     m = Node("Model")
-    m.prop("L", model_id).prop("S", "Model::" + name).prop("S", "Camera")
+    m.prop("L", model_id).prop("S", _objname(name, "Model")).prop("S", "Camera")
     m.add("Version").prop("I", 232)
     p = m.add("Properties70")
     p.p70("Lcl Translation", "Lcl Translation", "", "A",
@@ -233,7 +288,7 @@ def _camera_model(model_id, name, t0, r0, focal_mm):
 
 def _camera_attr(attr_id, focal_mm):
     a = Node("NodeAttribute")
-    a.prop("L", attr_id).prop("S", "NodeAttribute::").prop("S", "Camera")
+    a.prop("L", attr_id).prop("S", _objname("", "NodeAttribute")).prop("S", "Camera")
     a.add("TypeFlags").prop("S", "Camera")
     a.add("GeometryVersion").prop("I", 124)
     p = a.add("Properties70")
@@ -245,7 +300,7 @@ def _camera_attr(attr_id, focal_mm):
 
 def _curve(curve_id, times, values):
     c = Node("AnimationCurve")
-    c.prop("L", curve_id).prop("S", "AnimCurve::").prop("S", "")
+    c.prop("L", curve_id).prop("S", _objname("", "AnimCurve")).prop("S", "")
     c.add("Default").prop("D", float(values[0]) if values else 0.0)
     c.add("KeyVer").prop("I", 4009)
     c.add("KeyTime").prop("l", times)
@@ -260,7 +315,7 @@ def _curve(curve_id, times, values):
 
 def _curve_node(node_id, label, dx, dy, dz):
     cn = Node("AnimationCurveNode")
-    cn.prop("L", node_id).prop("S", "AnimCurveNode::" + label).prop("S", "")
+    cn.prop("L", node_id).prop("S", _objname(label, "AnimCurveNode")).prop("S", "")
     p = cn.add("Properties70")
     p.p70("d|X", "Number", "", "A", ("D", dx))
     p.p70("d|Y", "Number", "", "A", ("D", dy))
@@ -268,8 +323,13 @@ def _curve_node(node_id, label, dx, dy, dz):
     return cn
 
 
-def write_camera_fbx(poses, output_path, fps=30):
-    """Write `poses` (from extract_camera_poses) as a binary FBX 7.4 animated camera."""
+def write_camera_fbx(poses, output_path, fps=30, frame_numbers=None):
+    """Write `poses` (from extract_camera_poses) as a binary FBX 7.4 animated camera.
+
+    `frame_numbers` optionally gives each pose's source-frame number (e.g. for video
+    decimated by N, [0, N, 2N, ...]) so the camera lines up with the original footage at
+    `fps`. Defaults to consecutive frames 0..len(poses)-1.
+    """
     if not poses:
         raise ValueError("no poses to export")
 
@@ -285,14 +345,17 @@ def write_camera_fbx(poses, output_path, fps=30):
     focal_mm = (36.0 * fpx / iw) if (fpx > 0 and iw > 0) else 35.0
 
     t0 = poses[0]["position"]
-    r0 = _quaternion_to_euler_deg(poses[0]["rotation_quat"])
+    r0 = _quaternion_to_euler_deg(_to_dcc_camera_quat(poses[0]["rotation_quat"]))
 
-    # animation samples
-    times = [int(round(i / fps * FBX_KTIME)) for i in range(len(poses))]
+    # animation samples -- key i sits at its source-frame number so a video-derived
+    # camera lines up with the original footage; defaults to consecutive frames.
+    if frame_numbers is None:
+        frame_numbers = list(range(len(poses)))
+    times = [int(round(fn / fps * FBX_KTIME)) for fn in frame_numbers]
     tx = [p["position"][0] for p in poses]
     ty = [p["position"][1] for p in poses]
     tz = [p["position"][2] for p in poses]
-    eul = [_quaternion_to_euler_deg(p["rotation_quat"]) for p in poses]
+    eul = [_quaternion_to_euler_deg(_to_dcc_camera_quat(p["rotation_quat"])) for p in poses]
     rx = [e[0] for e in eul]
     ry = [e[1] for e in eul]
     rz = [e[2] for e in eul]
@@ -303,9 +366,9 @@ def write_camera_fbx(poses, output_path, fps=30):
     objects.children.append(_camera_attr(attr_id, focal_mm))
 
     stack = objects.add("AnimationStack")
-    stack.prop("L", stack_id).prop("S", "AnimStack::Take 001").prop("S", "")
+    stack.prop("L", stack_id).prop("S", _objname("Take 001", "AnimStack")).prop("S", "")
     layer = objects.add("AnimationLayer")
-    layer.prop("L", layer_id).prop("S", "AnimLayer::BaseLayer").prop("S", "")
+    layer.prop("L", layer_id).prop("S", _objname("BaseLayer", "AnimLayer")).prop("S", "")
 
     t_node_id, r_node_id = _uid(), _uid()
     objects.children.append(_curve_node(t_node_id, "T", t0[0], t0[1], t0[2]))
@@ -343,7 +406,7 @@ def write_camera_fbx(poses, output_path, fps=30):
 
     top = [
         _header_extension(),
-        _global_settings(),
+        _global_settings(fps),
         _definitions(num_curvenodes=2, num_curves=len(curves)),
         objects,
         conns,

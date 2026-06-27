@@ -99,12 +99,15 @@ def _export_fbx_camera(scene, job_dir, log, fps=30):
     """Export a per-frame FBX matchmove camera from the undistorted reconstruction
     -> job_dir/camera_tracking/cameras.fbx (downloadable). Returns True on success."""
     try:
-        from pipeline.camera_tracking import extract_camera_poses, export_camera_fbx
+        from pipeline.camera_tracking import extract_camera_poses, export_camera_fbx, video_frame_timing
         tdir = os.path.join(job_dir, "camera_tracking")
         os.makedirs(tdir, exist_ok=True)
         poses = extract_camera_poses(os.path.join(scene, "sparse", "0"))
-        export_camera_fbx(poses, os.path.join(tdir, "cameras.fbx"), fps)
-        log(f"FBX matchmove camera exported ({len(poses)} frames) -> camera_tracking/cameras.fbx", "INFO")
+        v_fps, frame_numbers = video_frame_timing(job_dir, len(poses))
+        if v_fps:
+            fps = v_fps
+        export_camera_fbx(poses, os.path.join(tdir, "cameras.fbx"), fps, frame_numbers)
+        log(f"FBX matchmove camera exported ({len(poses)} frames @ {fps:g} fps) -> camera_tracking/cameras.fbx", "INFO")
         return True
     except Exception as e:
         log(f"FBX camera export failed: {e}", "WARNING")
