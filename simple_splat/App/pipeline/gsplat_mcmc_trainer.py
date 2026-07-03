@@ -16,7 +16,6 @@ Conventions (verified against gsplat 1.5.3 docs):
 
 import os
 import numpy as np
-from pathlib import Path
 
 
 def load_colmap_dataset(parent_dir, max_size=0):
@@ -452,7 +451,10 @@ def train_mcmc(parent_dir, total_steps=15000, cap_max=None,
         if 0 < n1 < n0:
             means, scales, quats, opac, sh0, shN = (
                 means[keep], scales[keep], quats[keep], opac[keep], sh0[keep], shN[keep])
-        log(f"Export prune: {n0:,} -> {n1:,} Gaussians (dropped {n0-n1:,} with opacity<={export_opacity_min}); scales floored")
+            log(f"Export prune: {n0:,} -> {n1:,} Gaussians (dropped {n0-n1:,} with opacity<={export_opacity_min}); scales floored")
+        else:
+            # n1==n0: nothing to prune; n1==0: pruning everything would be a bug — export unpruned
+            log(f"Export prune skipped ({n1:,}/{n0:,} pass opacity>{export_opacity_min}); scales floored")
 
     log(f"Exporting {means.shape[0]:,} Gaussians to PLY...")
     try:
@@ -483,7 +485,10 @@ def _export_3dgs_ply(param_dict, output_path, sh_degree):
     quats = param_dict['quats'].detach().cpu().numpy()
     opacities = torch.sigmoid(param_dict['opacities']).detach().cpu().numpy()
     sh0 = param_dict['sh0'].detach().cpu().numpy().reshape(len(means), -1)
-    shN = param_dict['shN'].detach().cpu().numpy().reshape(len(means), -1)
+    # shN is (N, K, 3) coeff-major; PLY f_rest_* is CHANNEL-major (R0..Rk, G0..Gk,
+    # B0..Bk) — same transpose gsplat's export_splats does. A plain reshape
+    # interleaves channels and scrambles all view-dependent color.
+    shN = param_dict['shN'].detach().cpu().numpy().transpose(0, 2, 1).reshape(len(means), -1)
 
     N = len(means)
     num_sh_rest = shN.shape[1]

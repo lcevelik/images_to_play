@@ -128,6 +128,10 @@ def depth_seed(parent_dir, out_ply, stride=8, model='small', merge_sparse=True,
         if (ii + 1) % 10 == 0:
             progress(f"[depth-seed]   {ii+1} views, {sum(len(a) for a in acc_xyz):,} raw pts")
 
+    if not acc_xyz:
+        # np.concatenate([]) raises a bare ValueError — name the actual problem
+        raise RuntimeError("depth-seed produced no points: no view had enough "
+                           "sparse anchors (>=20) to align its depth map")
     xyz = np.concatenate(acc_xyz).astype(np.float64)
     rgb = np.concatenate(acc_rgb).astype(np.uint8)
     progress(f"[depth-seed] {len(xyz):,} raw depth points")

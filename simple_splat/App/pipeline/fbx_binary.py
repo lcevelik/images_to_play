@@ -271,7 +271,7 @@ def _definitions(num_curvenodes, num_curves):
     return d
 
 
-def _camera_model(model_id, name, t0, r0, focal_mm):
+def _camera_model(model_id, name, t0, r0):
     m = Node("Model")
     m.prop("L", model_id).prop("S", _objname(name, "Model")).prop("S", "Camera")
     m.add("Version").prop("I", 232)
@@ -362,7 +362,7 @@ def write_camera_fbx(poses, output_path, fps=30, frame_numbers=None):
 
     # objects
     objects = Node("Objects")
-    objects.children.append(_camera_model(model_id, "TrackingCamera", t0, r0, focal_mm))
+    objects.children.append(_camera_model(model_id, "TrackingCamera", t0, r0))
     objects.children.append(_camera_attr(attr_id, focal_mm))
 
     stack = objects.add("AnimationStack")

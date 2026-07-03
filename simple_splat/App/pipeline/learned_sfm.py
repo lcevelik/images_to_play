@@ -24,7 +24,7 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
                     keep_two_view_tracks=False, mapper_min_angle=1.5,
                     mapper_max_reproj=4.0, mapper_min_matches=15):
     import torch
-    from lightglue import LightGlue, SuperPoint
+    from lightglue import LightGlue
     from lightglue.utils import load_image, rbd
     import pycolmap
 
@@ -61,19 +61,34 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
         if (i + 1) % 10 == 0 or i == len(imgs) - 1:
             progress(f"[learned-sfm] extracted {i+1}/{len(imgs)}")
 
-    # --- database: one shared camera (single-phone capture), images, keypoints ---
+    # --- database: shared camera per unique image size, images, keypoints ---
+    # One camera for everything assumes a single-phone capture, but a mixed
+    # portrait/landscape (or mixed-resolution) set would then get wrong
+    # intrinsics for every image that differs from the first one. Share a
+    # camera only among images with the same (W, H).
     db_path = os.path.join(output_dir, 'database.db')
     if os.path.exists(db_path):
         os.remove(db_path)
     db = pycolmap.Database.open(db_path)
-    W, H = sizes[0]
-    focal = 1.2 * max(W, H)
-    cam = pycolmap.Camera(model='SIMPLE_RADIAL', width=W, height=H,
-                          params=[focal, W / 2.0, H / 2.0, 0.0])
-    cam_id = db.write_camera(cam)
+
+    def _make_camera(size):
+        W, H = size
+        focal = 1.2 * max(W, H)
+        return pycolmap.Camera(model='SIMPLE_RADIAL', width=W, height=H,
+                               params=[focal, W / 2.0, H / 2.0, 0.0])
+
+    cam_ids = {}  # (W, H) -> camera_id
+    cams_by_size = {}
+    for size in sizes:
+        if size not in cam_ids:
+            cams_by_size[size] = _make_camera(size)
+            cam_ids[size] = db.write_camera(cams_by_size[size])
+    if len(cam_ids) > 1:
+        progress(f"[learned-sfm] {len(cam_ids)} distinct image sizes -> one camera each")
+
     image_ids = []
     for i, name in enumerate(names):
-        im = pycolmap.Image(name=name, camera_id=cam_id, image_id=i + 1)
+        im = pycolmap.Image(name=name, camera_id=cam_ids[sizes[i]], image_id=i + 1)
         db.write_image(im, True)
         db.write_keypoints(i + 1, kpts[i].astype(np.float32))
         image_ids.append(i + 1)
@@ -91,7 +106,8 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
             mu = matches.astype(np.uint32)
             db.write_matches(image_ids[a], image_ids[b], mu)
             tvg = pycolmap.estimate_two_view_geometry(
-                cam, kpts[a].astype(np.float64), cam, kpts[b].astype(np.float64), mu, opts)
+                cams_by_size[sizes[a]], kpts[a].astype(np.float64),
+                cams_by_size[sizes[b]], kpts[b].astype(np.float64), mu, opts)
             if tvg is not None and np.asarray(tvg.inlier_matches).shape[0] >= min_matches:
                 db.write_two_view_geometry(image_ids[a], image_ids[b], tvg)
                 nverified += 1

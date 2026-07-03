@@ -4,7 +4,6 @@ This module provides helpers to prepare data for 3D Gaussian Splatting training.
 """
 
 import os
-from pathlib import Path
 
 def generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=True):
     """
