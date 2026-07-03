@@ -28,8 +28,7 @@ def _pack_unorm(v, bits):
 
 
 def _normalize_chunked(vals, C):
-    """Per-chunk min-max normalize to [0,1]. vals shape (C*256,). Returns (norm, mn, mx)
-    with mn/mx shape (C,) — matching SuperSplat's normalize() edge rules."""
+    """Per-chunk min/max. vals shape (C*256,). Returns (mn, mx) with shape (C,)."""
     m = vals.reshape(C, 256)
     mn = m.min(axis=1)
     mx = m.max(axis=1)
@@ -150,14 +149,19 @@ def compress(in_ply, out_ply, max_sh=3, progress=print):
 
     vert = np.stack([pos[:N], rot[:N], scl[:N], color[:N]], axis=1).astype('<u4')
 
-    # SH bytes
+    # SH bytes. f_rest storage is CHANNEL-MAJOR: R coeffs [0:in_coeffs],
+    # G [in_coeffs:2*in_coeffs], B [2*in_coeffs:]. When truncating bands
+    # (out_coeffs < in_coeffs) we must take the first out_coeffs of EACH channel —
+    # taking f_rest_0..(out*3) contiguously grabs all-red coeffs (green-tint bug).
     sh_bytes = None
     if out_coeffs > 0:
+        in_coeffs = SH_BAND_COEFFS[bands_present]   # per channel, in the source file
         sh_cols = []
-        for k in range(out_coeffs * 3):
-            v = col(f'f_rest_{k}')[:N]
-            q = np.clip(np.trunc((v / 8.0 + 0.5) * 256), 0, 255).astype(np.uint8)
-            sh_cols.append(q)
+        for ch in range(3):
+            for j in range(out_coeffs):
+                v = col(f'f_rest_{ch * in_coeffs + j}')[:N]
+                q = np.clip(np.trunc((v / 8.0 + 0.5) * 256), 0, 255).astype(np.uint8)
+                sh_cols.append(q)
         sh_bytes = np.stack(sh_cols, axis=1)        # (N, coeffs*3) uint8
 
     # header
@@ -182,7 +186,6 @@ def compress(in_ply, out_ply, max_sh=3, progress=print):
         if sh_bytes is not None:
             f.write(sh_bytes.tobytes())
 
-    import os
     sz_in = os.path.getsize(in_ply)
     sz_out = os.path.getsize(out_ply)
     progress(f"[compress] {sz_in/1e6:.1f} MB -> {sz_out/1e6:.1f} MB ({sz_in/sz_out:.1f}x) -> {out_ply}")

@@ -132,8 +132,12 @@ def detect_mixed_cameras(image_path, sample_size=10):
 
 
 def _load_presets():
-    """Load preset JSON files from presets/ directory. Returns dict or None if not found."""
-    preset_dir = pathlib.Path(__file__).parent / "presets"
+    """Load preset JSON files from the App presets/ directory. Returns dict or None if not found.
+
+    NOTE: this file lives in App/pipeline/, but the presets live in App/presets/
+    (one level up). Using `parent / "presets"` here silently broke the JSON preset
+    system after the 2026-06-14 reorg — everything fell back to the stale inline dict."""
+    preset_dir = pathlib.Path(__file__).parent.parent / "presets"
     if not preset_dir.exists():
         return None
     presets = {}
@@ -196,73 +200,43 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     # Load presets from JSON files, fall back to inline dict if not found
     _json_presets = _load_presets()
 
-    # Simplified preset system - 3 main presets plus legacy compatibility
-    # LOW: Fast preview (sparse only, minimal features)
-    # MEDIUM: Balanced quality (dense enabled, good features)
-    # HIGH: Maximum quality (dense + quality mode, unlimited features)
+    # Inline fallback presets — used ONLY if the presets/ JSON directory is missing.
+    # Kept as a mirror of presets/*.json (low/medium/high/quality/expert); edit the
+    # JSON files to tune presets, not this dict.
     detail_settings = {
-        # === NEW SIMPLIFIED PRESETS ===
-        # Settings progression: LOW is most permissive (ensures reconstruction works)
-        # tri_angle: LOWER = keeps points with smaller triangulation angles (more permissive)
-        # reproj_error: HIGHER = allows more reprojection error (more permissive)
-        # match_ratio: HIGHER = keeps more feature matches (more permissive)
-        
         'low': {
             'features': 16384, 'peak': 0.006, 'tracks': 200000, 'octaves': 4,
             'tri_angle': 0.25, 'reproj_error': 16.0, 'match_ratio': 0.9,
-            'dense': False,  # Sparse only for speed
-            'description': 'Fast Preview - Sparse only, ~50K-200K points, ~2-5 min'
+            'dense': False,
+            'description': 'Fast Preview - Sparse only, ~50K-200K points, ~2-4 min'
         },
         'medium': {
             'features': 32768, 'peak': 0.004, 'tracks': 500000, 'octaves': 5,
             'tri_angle': 0.1, 'reproj_error': 24.0, 'match_ratio': 0.92,
-            'dense': True,  # Enable dense for quality
-            'mvs_window_radius': 5, 'mvs_iterations': 5, 'mvs_samples': 15,
-            'description': 'Balanced Quality - Dense enabled, ~500K-2M points, ~5-15 min'
+            'dense': False,
+            'description': 'Balanced Quality - Sparse only (MVS skipped: no benefit for Brush), ~5-10 min'
         },
         'high': {
             'features': 0, 'peak': 0.0001, 'tracks': 10000000, 'octaves': 8,
             'tri_angle': 0.01, 'reproj_error': 64.0, 'match_ratio': 0.98,
             'ba_max_points': 10000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
-            'dense': True,  # Dense with quality mode
-            'mvs_window_radius': 7, 'mvs_iterations': 10, 'mvs_samples': 25,
-            'force_quality': True,  # Force quality mode ON
-            'description': 'Maximum Quality - Dense + Quality Mode, 5M-50M+ points, ~20-60 min'
+            'dense': False,
+            'force_quality': True,
+            'description': 'Quality sweet spot - unlimited SIFT, tight COLMAP BA, sparse only, ~10-20 min'
         },
-
-        # === LEGACY PRESETS (for backward compatibility) ===
-        # All legacy presets use permissive settings to ensure reconstruction works
-        'ultra': {
-            'features': 65536, 'peak': 0.001, 'tracks': 500000, 'octaves': 6,
-            'tri_angle': 0.05, 'reproj_error': 32.0, 'match_ratio': 0.95,
-            'dense': True,
-            'description': 'Ultra Quality - 65K features, dense enabled'
-        },
-        'extreme': {
-            'features': 100000, 'peak': 0.0005, 'tracks': 1000000, 'octaves': 7,
-            'tri_angle': 0.02, 'reproj_error': 48.0, 'match_ratio': 0.97,
-            'dense': True,
-            'description': 'Extreme Quality - 100K features'
-        },
-        'insane': {
-            'features': 0, 'peak': 0.0001, 'tracks': 5000000, 'octaves': 8,
-            'tri_angle': 0.005, 'reproj_error': 96.0, 'match_ratio': 0.99,
-            'dense': True,
-            'mvs_window_radius': 7, 'mvs_iterations': 10, 'mvs_samples': 25,
-            'description': 'Insane Quality - Maximum permissive settings'
-        },
-        'unlimited': {
-            'features': 0, 'peak': 0.00001, 'tracks': 10000000, 'octaves': 8,
-            'tri_angle': 0.001, 'reproj_error': 128.0, 'match_ratio': 0.999,
-            'ba_max_points': 10000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
-            'dense': True,
-            'description': 'Unlimited - All features, maximum points'
+        'quality': {
+            'features': 0, 'peak': 0.00005, 'tracks': 20000000, 'octaves': 8,
+            'tri_angle': 0.005, 'reproj_error': 96.0, 'match_ratio': 0.995,
+            'ba_max_points': 20000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
+            'dense': False,
+            'force_quality': True,
+            'description': 'Maximum practical quality - aggressive COLMAP, sparse only, ~20-40 min'
         },
         'expert': {
             'features': 0, 'peak': 0.000005, 'tracks': 50000000, 'octaves': 8,
             'tri_angle': 0.01, 'reproj_error': 128.0, 'match_ratio': 0.99,
             'ba_max_points': 50000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
-            'dense': True,
+            'dense': False,
             'expert': True,
             'domain_size_pooling': True,
             'affine_shape': True,
@@ -272,22 +246,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
             'refine_principal': True,
             'refine_distortion': True,
             'extract_colors': True,
-            'mvs_window_radius': 9,
-            'mvs_iterations': 15,
-            'mvs_samples': 30,
-            'description': 'Expert - All advanced features enabled'
-        },
-        'sharpness': {
-            'features': 0, 'peak': 0.00005, 'tracks': 20000000, 'octaves': 8,
-            'tri_angle': 0.005, 'reproj_error': 128.0, 'match_ratio': 0.995,
-            'ba_max_points': 20000000, 'tri_complete_error': 96.0, 'tri_merge_error': 96.0,
-            'dense': True,
-            'ultra_sharpness': True,
-            'mvs_window_radius': 11,
-            'mvs_iterations': 20,
-            'mvs_samples': 40,
-            'force_quality': True,
-            'description': '🔥 Maximum Sharpness - Ultra MVS + 200K steps recommended'
+            'description': 'Expert - All COLMAP features, full lens calibration, sparse only'
         },
     }
     # Use JSON presets if available, fall back to inline dict
@@ -338,9 +297,6 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
         log_progress(f"[DENSE] Dense reconstruction: DISABLED (sparse only)", "INFO")
     if quality_mode:
         log_progress(f"[QUALITY] Quality mode: ENABLED (maximum point density)", "INFO")
-    if detail_level == 'unlimited':
-        log_progress("[MAP] Two-view tracks: ENABLED (keeps points seen by only 2 cameras)", "INFO")
-        log_progress("[MAP] Extra triangulation pass: ENABLED", "INFO")
     log_progress(f"[GPU] CUDA acceleration: ENABLED", "INFO")
     log_progress("=" * 60, "INFO")
     
@@ -382,47 +338,8 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
     log_file_path = os.path.join(parent_dir, "colmap_run.log")
     total_start_time = time.time()
 
-    # Add COLMAP bin/lib folders to PATH for DLL loading
-    # COLMAP 4.x bundles all DLLs in bin/; 3.x used a separate lib/ folder
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir)
-    bundled_colmap_lib = os.path.join(project_root, 'COLMAP', 'lib')
-    bundled_colmap_bin_dir = os.path.join(project_root, 'COLMAP', 'bin')
-    bundled_colmap_bin = os.path.join(bundled_colmap_bin_dir, 'colmap.exe')
-    _current_path = os.environ.get("PATH", "")
-    if os.path.exists(bundled_colmap_bin_dir) and bundled_colmap_bin_dir not in _current_path:
-        os.environ["PATH"] = bundled_colmap_bin_dir + ";" + _current_path
-    if os.path.exists(bundled_colmap_lib) and bundled_colmap_lib not in _current_path:
-        os.environ["PATH"] = bundled_colmap_lib + ";" + os.environ.get("PATH", "")
-
-    # Also add system COLMAP bin/lib folders if present
-    colmap_bin_dir = r"C:\COLMAP\bin"
-    colmap_lib = r"C:\COLMAP\lib"
-    _current_path = os.environ.get("PATH", "")
-    if os.path.exists(colmap_bin_dir) and colmap_bin_dir not in _current_path:
-        os.environ["PATH"] = colmap_bin_dir + ";" + _current_path
-    if os.path.exists(colmap_lib) and colmap_lib not in _current_path:
-        os.environ["PATH"] = colmap_lib + ";" + os.environ.get("PATH", "")
-
-    # Find COLMAP path first (will be used in all commands)
-    colmap_path = None
-    possible_colmap_paths = [
-        bundled_colmap_bin,  # Bundled COLMAP (highest priority - correct version)
-        "colmap",  # In PATH
-        r"C:\COLMAP\bin\colmap.exe",
-        r"C:\COLMAP\colmap.exe",
-    ]
-
-    for path in possible_colmap_paths:
-        try:
-            result = subprocess.run([path, "--help"], capture_output=True, timeout=10)
-            if result.returncode == 0:
-                colmap_path = path
-                print(f"Found COLMAP at: {path}")
-                break
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-
+    # COLMAP path + DLL PATH setup: probed once at module level by get_colmap_path()
+    colmap_path = get_colmap_path()
     if not colmap_path:
         raise Exception("COLMAP is not installed or not in PATH. Please install COLMAP from https://github.com/colmap/colmap/releases")
 
@@ -492,8 +409,8 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
 
         log_progress(f"[CPU] Using {num_threads} threads for mapping & bundle adjustment", "INFO")
 
-        # Add extra settings for unlimited/dense/expert modes
-        if detail_level in ['unlimited', 'dense', 'expert']:
+        # Add extra settings for expert mode ('unlimited'/'dense' presets were removed)
+        if detail_level == 'expert':
             mapper_cmd += (
                 f'--Mapper.ba_global_max_num_iterations 100 '
                 f'--Mapper.ba_global_max_refinements 10 '
@@ -608,23 +525,6 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
         ("3D Mapping", mapper_cmd, "Reconstructing 3D structure from matched features"),
     ]
     
-    # For unlimited mode, add extra triangulation pass to find more points
-    if detail_level == 'unlimited' and not use_glomap:
-        # Point triangulator tries to triangulate more points from existing matches
-        triangulator_cmd = (
-            f'{colmap_cmd} point_triangulator '
-            f'--database_path "{database_path}" '
-            f'--image_path "{image_path}" '
-            f'--input_path "{sparse_folder}/0" '
-            f'--output_path "{sparse_folder}/0" '
-            f'--Mapper.filter_min_tri_angle 0.0001 '
-            f'--Mapper.filter_max_reproj_error 128 '
-            f'--Mapper.tri_min_angle 0.0001 '
-            f'--Mapper.tri_ignore_two_view_tracks 0 '
-            f'--Mapper.tri_complete_max_transitivity 200'
-        )
-        commands.append(("Extra Triangulation", triangulator_cmd, "Finding additional 3D points from matches (unlimited mode)"))
-
     with open(log_file_path, "w") as log_file:
         log_file.write(f"COLMAP run started at: {datetime.datetime.now()}\n")
         log_file.write(f"Detail level: {detail_level} ({settings['features']} features)\n")
@@ -914,7 +814,7 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                         f'--PatchMatchStereo.num_samples {mvs_samples} '
                         f'--PatchMatchStereo.filter_min_ncc {mvs_filter_ncc} '
                         f'--PatchMatchStereo.num_threads {num_threads} '
-                        f'--PatchMatchStereo.cache_size {int(get_available_ram_mb() * 0.7)}'
+                        f'--PatchMatchStereo.cache_size {max(8, int(get_available_ram_mb() * 0.7 / 1024))}'  # flag unit is GB, not MB
                     )
                     
                     log_progress(f"[MVS] Window radius: {mvs_window}, Iterations: {mvs_iters}, Samples: {mvs_samples}", "INFO")
@@ -1019,11 +919,15 @@ def run_colmap(image_path, matcher_type, interval, model_type, detail_level='med
                                 f'--PatchMatchStereo.num_iterations {fallback_iters} '
                                 f'--PatchMatchStereo.num_samples {fallback_samples} '
                                 f'--PatchMatchStereo.filter_min_ncc {mvs_filter_ncc} '
-                                f'--PatchMatchStereo.cache_size {int(get_available_ram_mb() * 0.7)}'
+                                f'--PatchMatchStereo.cache_size {max(8, int(get_available_ram_mb() * 0.7 / 1024))}'  # flag unit is GB, not MB
                             )
                             
                             log_file.write(f"Fallback command: {patch_match_fallback}\n")
-                            fallback_result = subprocess.run(patch_match_fallback, shell=True, capture_output=True, text=True, timeout=3600)
+                            try:
+                                fallback_result = subprocess.run(patch_match_fallback, shell=True, capture_output=True, text=True, timeout=3600)
+                            except subprocess.TimeoutExpired:
+                                # This path must degrade to sparse-only, not abort the whole job
+                                fallback_result = subprocess.CompletedProcess(patch_match_fallback, -1, '', 'timed out after 3600s')
                             
                             if fallback_result.returncode == 0:
                                 log_progress(f"  [OK] Fallback succeeded! Depth maps computed with CPU/reduced settings", "INFO")
@@ -1179,7 +1083,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_type', default='3dgs', choices=['3dgs', 'nerfstudio'],
                         help="Model type to run. '3dgs' includes undistortion, 'nerfstudio' skips undistortion.")
     parser.add_argument('--detail_level', default='medium', 
-                        choices=['low', 'medium', 'high', 'ultra', 'extreme', 'maximum', 'insane', 'unlimited', 'dense', 'expert', 'sharpness'],
+                        choices=['low', 'medium', 'high', 'quality', 'expert'],
                         help="Detail level for feature extraction (default: medium).")
     parser.add_argument('--quality_mode', action='store_true',
                         help="Enable quality mode for maximum point density (slower)")

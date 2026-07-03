@@ -16,7 +16,7 @@ import sys
 import glob
 import time
 import shutil
-import struct
+import threading
 import subprocess
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,20 +42,31 @@ def _hidden_si():
 
 
 def _run(cmd, log, cwd=APP_DIR, timeout=None):
-    """Run a subprocess, streaming stdout to log(). Raises on non-zero exit."""
+    """Run a subprocess, streaming stdout to log(). Raises on non-zero exit.
+
+    stdout is drained on a reader thread so the timeout fires even when the child
+    hangs SILENTLY — checking the clock only per output line never times out a
+    child that stops writing (a detached recipe job would then be stuck forever)."""
     log(f"$ {' '.join(str(c) for c in cmd)}", "DEBUG")
     p = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, bufsize=1, env=os.environ.copy(),
                          creationflags=_NO_WINDOW, startupinfo=_hidden_si())
-    start = time.time()
-    for line in p.stdout:
-        line = line.rstrip()
-        if line:
-            log(line, "INFO")
-        if timeout and time.time() - start > timeout:
-            p.kill()
-            raise TimeoutError(f"step exceeded {timeout}s")
-    p.wait()
+
+    def _drain():
+        for line in p.stdout:
+            line = line.rstrip()
+            if line:
+                log(line, "INFO")
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+        raise TimeoutError(f"step exceeded {timeout}s: {cmd[0]}")
+    reader.join(timeout=10)
     if p.returncode != 0:
         raise RuntimeError(f"subprocess failed (exit {p.returncode}): {cmd[0]}")
 
@@ -217,7 +228,6 @@ def run_production(images_dir, job_dir, status_cb, log, export_fbx=False):
     # Train MCMC and Brush IN PARALLEL — they're independent (same seed) and fit in 48 GB
     # together (~14 GB each on the RTX 8000), so wall-clock ~halves vs sequential (~4 hr -> ~2.5 hr).
     # Each runs as its own GPU subprocess; threads here just wait on them concurrently.
-    import threading
     status_cb("Training MCMC + Brush in parallel (~2.5 hr)...", 15, "training")
     mcmc = os.path.join(job_dir, "mcmc", "gaussian_splat.ply")
     os.makedirs(os.path.dirname(mcmc), exist_ok=True)

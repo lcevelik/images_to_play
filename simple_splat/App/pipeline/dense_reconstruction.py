@@ -48,7 +48,6 @@ def run_dense_reconstruction(parent_dir, image_path, sparse_path, enable_dense=T
     dense_workspace = os.path.join(parent_dir, 'dense')
     os.makedirs(dense_workspace, exist_ok=True)
 
-    stereo_folder = os.path.join(dense_workspace, 'stereo')
     fused_ply_path = os.path.join(dense_workspace, 'fused.ply')
 
     total_start = time.time()
@@ -92,21 +91,21 @@ def run_dense_reconstruction(parent_dir, image_path, sparse_path, enable_dense=T
         window_radius = 11  # Largest window = maximum context
         num_samples = 40    # Maximum samples = best accuracy
         num_iterations = 20 # Maximum iterations = best convergence
-        filter = 0.3  # Very permissive
+        geom_max_cost = 0.3  # Very permissive
         print("  🔥 Using ULTRA SHARPNESS MODE: 11px window, 40 samples, 20 iterations")
     elif quality_mode:
         # Quality mode: Maximum detail settings
         window_radius = 7  # Larger window = more context (default 5)
         num_samples = 25   # More samples = better accuracy (default 15)
         num_iterations = 10  # More iterations = better convergence (default 5)
-        filter = 0.5  # Lower = more permissive (default higher)
+        geom_max_cost = 0.5  # Lower = more permissive (default higher)
         print("  Using QUALITY MODE: 7px window, 25 samples, 10 iterations")
     else:
         # Balanced settings
         window_radius = 5
         num_samples = 15
         num_iterations = 5
-        filter = 1.0
+        geom_max_cost = 1.0
 
     stereo_cmd = (
         f'"{colmap_path}" patch_match_stereo '
@@ -114,16 +113,16 @@ def run_dense_reconstruction(parent_dir, image_path, sparse_path, enable_dense=T
         f'--workspace_format COLMAP '
         f'--PatchMatchStereo.geom_consistency true '
         f'--PatchMatchStereo.gpu_index 0 '
-        f'--PatchMatchStereo.depth_min 0.0 '
-        f'--PatchMatchStereo.depth_max 100.0 '
+        # no depth_min/depth_max: COLMAP derives the range from the sparse model;
+        # a hardcoded 0-100 silently truncated scenes with larger extent
         f'--PatchMatchStereo.window_radius {window_radius} '
         f'--PatchMatchStereo.num_samples {num_samples} '
         f'--PatchMatchStereo.num_iterations {num_iterations} '
         f'--PatchMatchStereo.filter_min_ncc 0.1 '
         f'--PatchMatchStereo.filter_min_triangulation_angle 1.0 '
         f'--PatchMatchStereo.filter_min_num_consistent 2 '
-        f'--PatchMatchStereo.filter_geom_consistency_max_cost {filter} '
-        f'--PatchMatchStereo.cache_size {max(16, int(__import__("psutil").virtual_memory().total / (1024**3) * 0.7))}'
+        f'--PatchMatchStereo.filter_geom_consistency_max_cost {geom_max_cost} '
+        f'--PatchMatchStereo.cache_size {max(16, int(psutil.virtual_memory().total / (1024**3) * 0.7))}'
     )
 
     result = subprocess.run(stereo_cmd, shell=True, capture_output=True, text=True)
@@ -230,7 +229,9 @@ if __name__ == "__main__":
     parser.add_argument('--parent_dir', required=True, help="Parent directory containing sparse/ folder")
     parser.add_argument('--image_path', required=True, help="Path to source images")
     parser.add_argument('--max_image_size', type=int, default=3200, help="Max image dimension (default: 3200)")
-    parser.add_argument('--enable_dense', type=bool, default=True, help="Enable dense reconstruction")
+    # NOTE: not type=bool — bool('False') is True, so any value would enable it
+    parser.add_argument('--enable_dense', type=lambda s: s.lower() not in ('false', '0', 'no'),
+                        default=True, help="Enable dense reconstruction (true/false)")
 
     args = parser.parse_args()
 
