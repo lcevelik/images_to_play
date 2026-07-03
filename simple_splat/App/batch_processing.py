@@ -6,10 +6,8 @@ Handles multiple job submissions, queue management, and batch status tracking.
 import os
 import uuid
 import time
-import json
 import threading
 from collections import OrderedDict
-from pathlib import Path
 
 
 class BatchJob:
@@ -48,12 +46,9 @@ class BatchJob:
 class BatchQueue:
     """Manages a queue of jobs for batch processing."""
 
-    def __init__(self, max_concurrent=3):
-        self.max_concurrent = max_concurrent
+    def __init__(self):
         self._batches = OrderedDict()  # batch_id -> {info, jobs: [BatchJob]}
         self._lock = threading.Lock()
-        self._processing_thread = None
-        self._stop_event = threading.Event()
 
     def create_batch(self, name=None):
         """Create a new batch and return its ID."""
@@ -104,8 +99,10 @@ class BatchQueue:
         jobs = batch['jobs']
 
         for job in jobs:
-            if self._stop_event.is_set():
-                job.status = 'cancelled'
+            # cancel_batch marks this batch's jobs 'cancelled'; skip them.
+            # (Per-job check, NOT a queue-global event — a global stop event would
+            # cancel every future batch after the first cancellation.)
+            if job.status == 'cancelled':
                 continue
 
             try:
@@ -192,7 +189,6 @@ class BatchQueue:
             for job in self._batches[batch_id]['jobs']:
                 if job.status in ('pending', 'running'):
                     job.status = 'cancelled'
-            self._stop_event.set()
 
         return True
 
@@ -223,10 +219,10 @@ class BatchQueue:
 
 
 # Global batch queue instance
-batch_queue = BatchQueue(max_concurrent=3)
+batch_queue = BatchQueue()
 
 
-def register_batch_routes(app, processing_folder, upload_fn, process_fn, monitor_fn):
+def register_batch_routes(app, processing_folder, process_fn, monitor_fn):
     """Register batch processing routes on the Flask app."""
 
     @app.route('/batch/create', methods=['POST'])
@@ -265,14 +261,20 @@ def register_batch_routes(app, processing_folder, upload_fn, process_fn, monitor
         if not saved_paths:
             return jsonify({'error': 'No valid files saved'}), 400
 
+        # enable_dense / max_image_size / training_steps stay None unless the form
+        # explicitly provides them — app.py treats None as "use the preset default".
+        # Hard defaults here (enable_dense=true, 3200px) silently forced dense MVS on
+        # and downgraded high/quality/expert resolution for every batch job.
+        _dense = request.form.get('enable_dense')
+        _max_size = request.form.get('max_image_size')
         settings = {
             'matcher_type': request.form.get('matcher_type', 'exhaustive_matcher'),
             'interval': int(request.form.get('interval', 1)),
             'quality_scale': request.form.get('quality_scale', 'standard'),
             'trainer': request.form.get('trainer', 'brush'),
-            'enable_dense': request.form.get('enable_dense', 'true').lower() == 'true',
+            'enable_dense': (_dense.lower() == 'true') if _dense is not None else None,
             'training_steps': request.form.get('training_steps'),
-            'max_image_size': int(request.form.get('max_image_size', 3200)),
+            'max_image_size': int(_max_size) if _max_size is not None else None,
         }
 
         job_id = batch_queue.add_job(batch_id, name, preset, saved_paths, settings)
@@ -285,8 +287,7 @@ def register_batch_routes(app, processing_folder, upload_fn, process_fn, monitor
 
         def _upload(image_paths, preset, settings):
             """Create a job by calling process_fn directly (no HTTP roundtrip)."""
-            import uuid as _uuid
-            job_id = str(_uuid.uuid4())
+            job_id = str(uuid.uuid4())
             # Use the first image path's parent as the image folder
             image_folder = os.path.dirname(image_paths[0])
             # Call the process function directly

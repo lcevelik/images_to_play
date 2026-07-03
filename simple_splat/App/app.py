@@ -44,7 +44,6 @@ import json
 from datetime import datetime
 from collections import deque
 import time
-import numpy as np
 
 # Image processing constants
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
@@ -60,13 +59,16 @@ def resize_images_for_colmap(image_folder, max_size=3840):
     def _resize_one(args):
         fpath, max_size = args
         try:
-            img = Image.open(fpath)
-            w, h = img.size
-            if max(w, h) > max_size:
+            # Context manager: without it the file handle stays open until GC,
+            # which locks the file on Windows and can break the later save.
+            with Image.open(fpath) as img:
+                w, h = img.size
+                if max(w, h) <= max_size:
+                    return False
                 scale = max_size / max(w, h)
-                img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-                img.save(fpath, quality=95)
-                return True
+                resized_img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            resized_img.save(fpath, quality=95)
+            return True
         except Exception:
             pass
         return False
@@ -109,11 +111,11 @@ def filter_blurry_images(image_folder, blur_threshold=100.0):
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
-# Anchor data folders to app.py's own directory (absolute), NOT the cwd. Otherwise
-# launching the server from a different working directory (e.g. the repo root vs
-# App/) puts jobs in one 'processing' folder but serves files from another — which
-# made /ply and /align 500 with "file not found" on files that clearly existed.
-_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# Anchor data folders to app.py's own directory (absolute, _APP_DIR from the top of
+# this file), NOT the cwd. Otherwise launching the server from a different working
+# directory (e.g. the repo root vs App/) puts jobs in one 'processing' folder but
+# serves files from another — which made /ply and /align 500 with "file not found"
+# on files that clearly existed.
 app.config['UPLOAD_FOLDER'] = os.path.join(_APP_DIR, 'uploads')
 app.config['PROCESSING_FOLDER'] = os.path.join(_APP_DIR, 'processing')
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max file size
@@ -425,43 +427,44 @@ def extract_frames_from_video(video_path, output_folder, frame_interval=10, max_
         add_log(f"Extracting frames from video: {video_path}", "INFO")
         
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            add_log(f"Could not open video: {video_path}", "ERROR")
-            return 0
-        
-        # Get video properties
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        duration = total_frames / fps if fps > 0 else 0
-        
-        add_log(f"Video info: {total_frames} frames, {fps:.1f} FPS, {duration:.1f} seconds", "INFO")
-        
-        # Calculate optimal frame interval if we have too many frames
-        if total_frames / frame_interval > max_frames:
-            frame_interval = total_frames // max_frames
-            add_log(f"Adjusted frame interval to {frame_interval} (max {max_frames} frames)", "INFO")
-        
-        os.makedirs(output_folder, exist_ok=True)
-        
-        frame_count = 0
-        extracted_count = 0
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            if frame_count % frame_interval == 0:
-                frame_filename = os.path.join(output_folder, f"frame_{extracted_count:05d}.jpg")
-                cv2.imwrite(frame_filename, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                extracted_count += 1
-                
-                if extracted_count >= max_frames:
+        try:
+            if not cap.isOpened():
+                add_log(f"Could not open video: {video_path}", "ERROR")
+                return 0
+
+            # Get video properties
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            duration = total_frames / fps if fps > 0 else 0
+
+            add_log(f"Video info: {total_frames} frames, {fps:.1f} FPS, {duration:.1f} seconds", "INFO")
+
+            # Calculate optimal frame interval if we have too many frames
+            if total_frames / frame_interval > max_frames:
+                frame_interval = total_frames // max_frames
+                add_log(f"Adjusted frame interval to {frame_interval} (max {max_frames} frames)", "INFO")
+
+            os.makedirs(output_folder, exist_ok=True)
+
+            frame_count = 0
+            extracted_count = 0
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
                     break
-            
-            frame_count += 1
-        
-        cap.release()
+
+                if frame_count % frame_interval == 0:
+                    frame_filename = os.path.join(output_folder, f"frame_{extracted_count:05d}.jpg")
+                    cv2.imwrite(frame_filename, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    extracted_count += 1
+
+                    if extracted_count >= max_frames:
+                        break
+
+                frame_count += 1
+        finally:
+            cap.release()
         add_log(f"Extracted {extracted_count} frames from video", "INFO")
 
         # Persist the source frame rate + interval so a matchmove FBX export can match the
@@ -645,16 +648,17 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 # Spawn the recipe as a DETACHED process that writes status/output to the
                 # job dir. It runs independently of the Flask server, so a server restart
                 # or crash never orphans the job (status is read back from recipe_status.json).
-                import sys as _sys
                 _recipes_py = os.path.join(_APP_DIR, 'pipeline', 'recipes.py')
                 _job_dir = os.path.dirname(image_path)
-                _spawn_log = open(os.path.join(_job_dir, 'recipe_spawn.log'), 'w')
                 _flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == 'nt' else 0
-                _cmd = [_sys.executable, _recipes_py, _quality, image_path, _job_dir]
+                _cmd = [sys.executable, _recipes_py, _quality, image_path, _job_dir]
                 if (advanced_settings or {}).get('export_fbx'):
                     _cmd.append('--fbx')
-                subprocess.Popen(_cmd, stdout=_spawn_log, stderr=subprocess.STDOUT,
-                                 creationflags=_flags, close_fds=True)
+                # Close the parent's copy of the log handle after spawning — the child
+                # holds its own; keeping ours open leaks one handle per recipe job.
+                with open(os.path.join(_job_dir, 'recipe_spawn.log'), 'w') as _spawn_log:
+                    subprocess.Popen(_cmd, stdout=_spawn_log, stderr=subprocess.STDOUT,
+                                     creationflags=_flags, close_fds=True)
                 add_log(f"[RECIPE] {_quality.upper()} pipeline launched (detached — survives server restarts)", "INFO")
                 processing_status[job_id]['step'] = f'{_quality.title()} pipeline starting...'
                 processing_status[job_id]['status'] = 'processing'
@@ -829,31 +833,14 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         except Exception as e:
             add_log(f"Could not read reconstruction stats: {e}", "DEBUG")
 
-        # Dense reconstruction (generates millions of points instead of thousands)
-        # Check if dense reconstruction already ran inside run_colmap() (for presets with dense: True)
+        # Dense reconstruction (generates millions of points instead of thousands).
+        # run_colmap() already runs MVS itself when the preset/override enables it,
+        # so here we only pick up an existing fused.ply or run the fallback MVS.
         dense_ply_path = None
-        detail_level_includes_mvs = False  # All presets now use sparse-only by default
-        
-        # Also check if dense PLY already exists (run_colmap may have already created it)
         potential_dense_ply = os.path.join(parent_dir, 'dense', 'fused.ply')
         dense_already_ran = os.path.exists(potential_dense_ply)
-        
-        if detail_level_includes_mvs:
-            # MVS already ran (or is running) inside run_colmap() - DO NOT run dense_reconstruction.py again!
-            # This prevents conflicts with existing dense/ workspace
-            add_log("Dense reconstruction handled by COLMAP preset, checking for output...", "INFO")
-            
-            if os.path.exists(potential_dense_ply):
-                dense_ply_path = potential_dense_ply
-                add_log(f"Found dense PLY from COLMAP MVS: {dense_ply_path}", "INFO")
-                # Copy to standard location
-                dense_output = os.path.join(parent_dir, 'point_cloud_dense.ply')
-                shutil.copy2(dense_ply_path, dense_output)
-                add_log(f"Dense point cloud saved to: {dense_output}", "INFO")
-            else:
-                add_log("Dense reconstruction may still be processing, or MVS may have failed", "INFO")
-                add_log("Check the logs for dense reconstruction progress", "INFO")
-        elif dense_already_ran:
+
+        if dense_already_ran:
             # Dense PLY exists but preset doesn't include MVS - use existing output
             add_log("Found existing dense PLY from previous run, using it...", "INFO")
             dense_ply_path = potential_dense_ply
@@ -874,10 +861,6 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 add_log("Starting dense reconstruction for millions of points...", "INFO")
                 add_log(f"Max image size: {max_image_size}px", "INFO")
 
-                # Determine ultra_sharpness mode from config
-                mvs_mode = config.get('mvs_quality_mode', 'balanced')
-                ultra_sharpness = (mvs_mode == 'ultra_sharpness') or (detail_level == 'sharpness')
-                
                 dense_ply_path = run_dense_reconstruction(
                     parent_dir=parent_dir,
                     image_path=image_path,
@@ -885,7 +868,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     enable_dense=enable_dense,
                     max_image_size=max_image_size,
                     quality_mode=quality_mode,
-                    ultra_sharpness_mode=ultra_sharpness,
+                    ultra_sharpness_mode=ultra_sharpness_enabled,
                     colmap_path=colmap_path
                 )
 
@@ -918,7 +901,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         trainer_used = None  # which trainer actually produced the output
 
         # --- MCMC branch ---
-        if trainer_choice in ('mcmc', 'mcmc_adc') and not ply_generated:
+        if trainer_choice in ('mcmc', 'mcmc_adc'):
             mcmc_strategy = 'adc' if trainer_choice == 'mcmc_adc' else 'mcmc'
             if mcmc_strategy == 'adc':
                 add_log("Using gsplat ADC trainer (adaptive densification — grows organically, no cap)", "INFO")
@@ -1098,7 +1081,6 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                     # Stream Brush stdout in a background thread so readline() never blocks the progress loop
                     training_start = time.time()
                     last_progress_time = [0]
-                    last_logged_step = [0]
                     brush_current_step = [0]
 
                     def _read_brush_stdout():
@@ -1191,6 +1173,10 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
 
                         if elapsed > timeout_seconds:
                             process.kill()
+                            try:
+                                process.wait(timeout=30)  # reap so returncode is set, not None
+                            except subprocess.TimeoutExpired:
+                                pass  # still salvage the checkpoint below
                             brush_timed_out = True
                             add_log(f"Brush exceeded time budget ({timeout_seconds}s) — stopping and salvaging latest checkpoint", "WARNING")
                             break
@@ -2043,6 +2029,18 @@ def get_status(job_id):
 
     return jsonify(status)
 
+def _pick_result_ply(folder):
+    """Best PLY to serve from a job folder. rglob order is arbitrary, so taking
+    ply_files[0] could return a Brush checkpoint (export_5000.ply) or the sparse
+    fallback instead of the final trained splat — prefer known outputs first."""
+    for name in ('gaussian_splat.ply', 'combined.ply', 'point_cloud.ply'):
+        p = os.path.join(folder, name)
+        if os.path.exists(p):
+            return p
+    ply_files = list(Path(folder).rglob('*.ply'))
+    return str(ply_files[0]) if ply_files else None
+
+
 @app.route('/ply/<job_id>.ply')
 @app.route('/ply/<job_id>')
 def serve_ply(job_id):
@@ -2061,17 +2059,17 @@ def serve_ply(job_id):
                 # resolves relative paths vs app.root_path — they disagree when the
                 # server is launched from a different cwd (caused a 500). Same fix as /align.
                 return send_file(os.path.abspath(ply_path), mimetype='application/octet-stream')
-            
-            ply_files = list(Path(output_path).rglob('*.ply'))
-            if ply_files:
-                return send_file(os.path.abspath(str(ply_files[0])), mimetype='application/octet-stream')
-    
+
+            found = _pick_result_ply(output_path)
+            if found:
+                return send_file(os.path.abspath(found), mimetype='application/octet-stream')
+
     # Fallback: check filesystem directly for jobs from previous sessions
     job_folder = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
     if os.path.exists(job_folder):
-        ply_files = list(Path(job_folder).rglob('*.ply'))
-        if ply_files:
-            return send_file(str(ply_files[0]), mimetype='application/octet-stream')
+        found = _pick_result_ply(job_folder)
+        if found:
+            return send_file(os.path.abspath(found), mimetype='application/octet-stream')
         
         # Try to generate PLY if sparse reconstruction exists
         sparse_path = os.path.join(job_folder, 'sparse', '0')
@@ -2127,10 +2125,12 @@ def download_file(job_id, file_type):
         safe_name = ''.join(c for c in raw_name if c.isalnum() or c in ('_', '-')) or 'gaussian_splat'
         download_name = safe_name + '.ply'
 
-        # Look for .ply file in output directory
-        ply_files = list(Path(output_path).rglob('*.ply'))
-        if ply_files:
-            return send_file(str(ply_files[0]), as_attachment=True, download_name=download_name)
+        # Prefer the job's recorded output, then known result names — an arbitrary
+        # rglob hit could be a Brush checkpoint rather than the final splat
+        recorded = processing_status.get(job_id, {}).get('ply_path')
+        found = recorded if (recorded and os.path.exists(recorded)) else _pick_result_ply(output_path)
+        if found:
+            return send_file(os.path.abspath(found), as_attachment=True, download_name=download_name)
 
         # Try to generate PLY if sparse reconstruction exists
         if sparse_path and os.path.exists(sparse_path):
@@ -2345,7 +2345,7 @@ if __name__ == '__main__':
                 return s
             return None
 
-        register_batch_routes(app, app.config['PROCESSING_FOLDER'], None, _batch_process_fn, _batch_monitor_fn)
+        register_batch_routes(app, app.config['PROCESSING_FOLDER'], _batch_process_fn, _batch_monitor_fn)
         add_log("Batch processing enabled", "INFO")
 
     add_log("Gaussian Splatting Server starting...", "INFO")
