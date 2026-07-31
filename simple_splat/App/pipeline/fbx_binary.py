@@ -218,9 +218,16 @@ def _header_extension():
 
 def _fps_to_timemode(fps):
     """Map fps -> (FBX TimeMode enum, custom_rate). Standard rates use their named enum
-    (most compatible); anything else uses eCustom (14) + CustomFrameRate."""
+    (most compatible); anything else uses eCustom (14) + CustomFrameRate.
+
+    The match must be exact, not rounded: a DCC that sees a named TimeMode ignores
+    CustomFrameRate, so rounding NTSC rates (23.976/29.97/59.94) onto their integer
+    neighbour would play the camera 0.1% fast and drift against the plate."""
     named = {120: 1, 100: 2, 60: 3, 50: 4, 48: 5, 30: 6, 25: 10, 24: 11}
-    return (named.get(int(round(fps)), 14), float(fps))
+    for rate, mode in named.items():
+        if abs(float(fps) - rate) < 1e-6:
+            return (mode, float(fps))
+    return (14, float(fps))
 
 
 def _global_settings(fps=30):
@@ -351,7 +358,12 @@ def write_camera_fbx(poses, output_path, fps=30, frame_numbers=None):
     # camera lines up with the original footage; defaults to consecutive frames.
     if frame_numbers is None:
         frame_numbers = list(range(len(poses)))
-    times = [int(round(fn / fps * FBX_KTIME)) for fn in frame_numbers]
+    # KTimes are indexed on the NOMINAL integer rate: importers convert ktime->frame
+    # with the integer frame rate (Blender uses scene.render.fps) and carry the
+    # fractional NTSC part in fps_base. Authoring an NTSC clip's times at 23.976
+    # spaces the keys 1.001 frames apart; authoring at 24 lands them on integers.
+    grid_fps = round(fps) or fps
+    times = [int(round(fn / grid_fps * FBX_KTIME)) for fn in frame_numbers]
     tx = [p["position"][0] for p in poses]
     ty = [p["position"][1] for p in poses]
     tz = [p["position"][2] for p in poses]

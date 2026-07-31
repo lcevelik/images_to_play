@@ -54,13 +54,16 @@ def _read_images_bin(path):
             qvec = np.array(d[1:5], np.float64)
             tvec = np.array(d[5:8], np.float64)
             cam_id = d[8]
-            while True:                                    # image name (null-terminated)
+            name = bytearray()                             # image name (null-terminated)
+            while True:
                 c = f.read(1)
                 if c in (b'\x00', b''):
                     break
+                name += c
             num2d = struct.unpack('<Q', f.read(8))[0]
             f.read(num2d * 24)                             # skip 2D points (x,y double + id uint64)
-            imgs.append({'qvec': qvec, 'tvec': tvec, 'cam_id': cam_id})
+            imgs.append({'qvec': qvec, 'tvec': tvec, 'cam_id': cam_id,
+                         'name': name.decode('utf-8', 'replace')})
     return imgs
 
 

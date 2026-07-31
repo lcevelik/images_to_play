@@ -11,5 +11,11 @@
   "tri_merge_error": 64.0,
   "dense": false,
   "force_quality": true,
-  "description": "Quality sweet spot - unlimited SIFT, tight COLMAP BA, sparse only, ~10-20 min"
+  "description": "Quality sweet spot - unlimited SIFT, tight COLMAP BA, sparse only, ~10-20 min",
+  "app": {
+    "detail_level": "high",
+    "training_steps": 30000,
+    "max_image_size": 4800,
+    "quality_mode": true
+  }
 }

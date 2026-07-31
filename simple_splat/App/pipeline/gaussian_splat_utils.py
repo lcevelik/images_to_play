@@ -5,7 +5,7 @@ This module provides helpers to prepare data for 3D Gaussian Splatting training.
 
 import os
 
-def generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=True):
+def generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=False):
     """
     Generate a basic .ply file from COLMAP points3D.
     This creates a simple point cloud, not a full Gaussian splat.
@@ -14,22 +14,28 @@ def generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=True
     Args:
         colmap_path: Path to COLMAP reconstruction
         output_ply_path: Output PLY file path
-        center_at_origin: If True, center the point cloud at origin
+        center_at_origin: If True, center the point cloud at origin. Defaults to
+            False — the camera poses and trained splat stay in the COLMAP frame,
+            so recentering only this cloud puts it out of register with them.
+
+    Reads points3D.bin with the pure-struct parser so this works in the bundled
+    Python (no pycolmap). pycolmap is only used for .txt reconstructions.
     """
     try:
-        import pycolmap
         import numpy as np
-        reconstruction = pycolmap.Reconstruction(colmap_path)
 
-        # Extract points
-        points = []
-        colors = []
-
-        for point3D_id, point3D in reconstruction.points3D.items():
-            xyz = point3D.xyz
-            points.append([float(xyz[0]), float(xyz[1]), float(xyz[2])])
-            color = point3D.color
-            colors.append([int(color[0]), int(color[1]), int(color[2])])
+        bin_path = os.path.join(colmap_path, 'points3D.bin')
+        if os.path.exists(bin_path):
+            from pipeline.sparse_preview import _read_points3D_bin
+            xyz, rgb01 = _read_points3D_bin(bin_path)
+            points = xyz.astype(np.float64)
+            colors = np.rint(rgb01 * 255.0).astype(np.uint8)
+        else:
+            import pycolmap
+            reconstruction = pycolmap.Reconstruction(colmap_path)
+            pts = [(p.xyz, p.color) for p in reconstruction.points3D.values()]
+            points = np.array([p[0] for p in pts], np.float64).reshape(-1, 3)
+            colors = np.array([p[1] for p in pts], np.uint8).reshape(-1, 3)
 
         if len(points) == 0:
             print("No points found in reconstruction")
@@ -37,10 +43,8 @@ def generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=True
 
         # Center the point cloud at origin
         if center_at_origin:
-            points_array = np.array(points)
-            centroid = np.mean(points_array, axis=0)
-            points_array = points_array - centroid
-            points = points_array.tolist()
+            centroid = np.mean(points, axis=0)
+            points = points - centroid
             print(f"Centered point cloud. Original centroid: {centroid}")
 
         # Write PLY file (binary for speed)
@@ -49,7 +53,8 @@ def generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=True
         return True
 
     except ImportError:
-        print("pycolmap not available. Install with: pip install pycolmap")
+        print("pycolmap not available (needed only for .txt reconstructions). "
+              "Install with: pip install pycolmap")
         return False
     except Exception as e:
         print(f"Error generating PLY: {e}")
@@ -129,6 +134,7 @@ def write_ply_file(output_path, points, colors=None):
     """Write a binary PLY file from points and optional colors.
     Uses batched numpy tobytes() for ~10x faster writing vs per-vertex struct.pack."""
     import numpy as np
+    has_colors = colors is not None and len(colors) > 0
     with open(output_path, 'wb') as f:
         # PLY header (ASCII)
         header = "ply\n"
@@ -137,7 +143,7 @@ def write_ply_file(output_path, points, colors=None):
         header += "property float x\n"
         header += "property float y\n"
         header += "property float z\n"
-        if colors:
+        if has_colors:
             header += "property uchar red\n"
             header += "property uchar green\n"
             header += "property uchar blue\n"
@@ -146,7 +152,7 @@ def write_ply_file(output_path, points, colors=None):
 
         # Batch write using numpy tobytes() — ~10x faster than per-vertex struct.pack
         pts = np.array(points, dtype=np.float32)
-        if colors:
+        if has_colors:
             cols = np.array(colors, dtype=np.uint8)
             # Interleave: for each vertex, write 3 floats + 3 uchars
             # Build a structured array

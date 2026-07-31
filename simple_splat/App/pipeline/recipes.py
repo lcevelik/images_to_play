@@ -24,8 +24,8 @@ if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)  # so direct `import pipeline.X` works when run as a script
 PY = sys.executable
 COLMAP = next((p for p in (r"C:\COLMAP\bin\colmap.exe", "colmap") if os.path.exists(p) or p == "colmap"), "colmap")
-BRUSH = next((p for p in (r"C:\Brush\brush_app.exe",
-                          os.path.join(APP_DIR, "Brush", "brush_app.exe")) if os.path.exists(p)), None)
+from pipeline.run_glomap import find_brush_binary
+BRUSH = find_brush_binary()
 
 # Suppress console/GUI pop-up windows for every spawned subprocess (Windows).
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0

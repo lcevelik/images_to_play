@@ -31,6 +31,19 @@ The server runs with `debug=True, use_reloader=False, use_debugger=False`. The r
 
 ML-Sharp detection (`sharp --help`) has a 30-second timeout because PyTorch takes ~6s to import on first run.
 
+The server binds **`127.0.0.1`** by default (it has no auth and executes uploads). Set `SPLAT_HOST=0.0.0.0` to expose it on the LAN deliberately.
+
+### Tests
+
+```bash
+cd simple_splat/App
+python -m pytest tests/test_cpu_regression.py -q     # ~0.5s, needs only numpy + pytest
+```
+
+`tests/test_cpu_regression.py` is the **CPU-only regression suite** — no GPU, COLMAP, Brush, server, or network. It pins the things that have silently regressed before: preset loading, the pure-`struct` COLMAP readers, the pycolmap-free PLY/pose fallbacks, `compress_ply`'s channel-major SH truncation (the green-tint bug), and the binary-FBX conventions (object-name separator, metre scale, declared fps, key grid). It runs in CI (`.github/workflows/tests.yml`, Python 3.11 + 3.14).
+
+The other two test files need real resources and are **not** in CI: `tests/test_mcmc_smoke.py` (CUDA + MSVC) and `tests/test_all_presets.py` (a live server + an image folder).
+
 ### COLMAP flag compatibility
 
 The installed COLMAP is **4.1.0** (from the 4.0.4 release tag). In 4.x the namespaces split:
@@ -143,7 +156,7 @@ The bundled `brush_app.exe` is **Brush v0.3.0** (ArthurBrussee/brush). Hard-won 
 
 Installed in the system Python (3.14). Key packages and their non-obvious requirements:
 - `torch` must be the **CUDA build** (`torch==2.x+cu126`), not `+cpu`. Install with `--index-url https://download.pytorch.org/whl/cu126 --force-reinstall`.
-- `pycolmap` — used only to read reconstruction stats; not required for the pipeline itself.
+- `pycolmap` — **optional**, and absent from the Lite bundle (`LITE_REQUIREMENTS` omits it; only `MCMC_REQUIREMENTS`/Full ships it). Everything on the Lite path reads COLMAP `*.bin` with the pure-`struct` readers in `pipeline/sparse_preview.py` (`_read_points3D_bin` / `_read_cameras_bin` / `_read_images_bin`, verified bit-identical to pycolmap on the Mip-360 garden model). pycolmap is only reached for `.txt` reconstructions, the "detailed stats" log line, and the Full-only modules (`learned_sfm`, `depth_seed`, `combine_splats`, `gsplat_mcmc_trainer`). **When adding a Lite-path code path, use the struct readers — do not add a hard pycolmap import.**
 - `gsplat` — required by ml-sharp at import time even if rendering is not used. **JIT-compiles its CUDA kernels on first use** — needs MSVC `cl.exe` on PATH (app.py discovers and adds it at startup; for standalone scripts, add `C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\<ver>\bin\Hostx64\x64` to PATH). First compile takes ~10 min; cached afterwards.
 - `pytorch-msssim` — Gaussian-windowed SSIM for the MCMC trainer loss. Do NOT replace with a hand-rolled avg_pool SSIM: its biased border statistics destroy training (verified: 32 dB vs 10.5 dB PSNR on synthetic data).
 

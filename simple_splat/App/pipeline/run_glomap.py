@@ -7,10 +7,30 @@ import time
 import datetime
 import re
 import threading
-from shutil import copy2, move, rmtree
+from shutil import copy2, move, rmtree, which
 
 # Thread-local storage for progress callbacks (thread-safe for concurrent jobs)
 _thread_local = threading.local()
+
+
+def find_brush_binary():
+    """Locate brush_app.exe — bundled copy first, then C:\\Brush, then PATH.
+
+    Single source of truth: app.py and pipeline/recipes.py both need this, and
+    the copies had drifted (recipes.py looked for the bundled binary under
+    App/Brush/ instead of simple_splat/Brush/, so it only ever found C:\\Brush)."""
+    app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bundled = os.path.join(os.path.dirname(app_dir), 'Brush', 'brush_app.exe')
+    for path in (bundled, r"C:\Brush\brush_app.exe", r"C:\Brush\brush.exe",
+                 "brush_app", "brush"):
+        if os.path.isabs(path):
+            if os.path.exists(path):
+                return path
+        else:
+            found = which(path)
+            if found:
+                return found
+    return None
 
 # ---- FIX #2: Cache COLMAP path (probe once at startup, not per-job) ----
 _colmap_path_cache = None
@@ -131,20 +151,43 @@ def detect_mixed_cameras(image_path, sample_size=10):
     return cv > 0.10
 
 
-def _load_presets():
-    """Load preset JSON files from the App presets/ directory. Returns dict or None if not found.
+PRESET_DIR = pathlib.Path(__file__).parent.parent / "presets"
 
-    NOTE: this file lives in App/pipeline/, but the presets live in App/presets/
-    (one level up). Using `parent / "presets"` here silently broke the JSON preset
-    system after the 2026-06-14 reorg — everything fell back to the stale inline dict."""
-    preset_dir = pathlib.Path(__file__).parent.parent / "presets"
-    if not preset_dir.exists():
-        return None
+_preset_cache = None
+
+def load_presets():
+    """Load the preset JSON files from App/presets/. This is the ONLY source of
+    preset values — both the COLMAP settings used here and the app-layer settings
+    (training steps, resize cap) under each preset's "app" key.
+
+    Raises if the directory is missing rather than falling back to an inline copy:
+    a stale mirror silently shadowed these files for weeks after the 2026-06-14
+    reorg, and every job ran with the wrong settings without a single warning.
+
+    NOTE: this file lives in App/pipeline/, but the presets live one level up."""
+    global _preset_cache
+    if _preset_cache is not None:
+        return _preset_cache
+    if not PRESET_DIR.exists():
+        raise FileNotFoundError(f"Preset directory not found: {PRESET_DIR}")
     presets = {}
-    for f in sorted(preset_dir.glob("*.json")):
+    for f in sorted(PRESET_DIR.glob("*.json")):
         with open(f) as fp:
             presets[f.stem] = json.load(fp)
-    return presets if presets else None
+    if not presets:
+        raise FileNotFoundError(f"No preset JSON files in {PRESET_DIR}")
+    _preset_cache = presets
+    return presets
+
+def get_app_settings(detail_level):
+    """App-layer settings for a preset: detail_level, training_steps,
+    max_image_size (pre-COLMAP resize cap) and quality_mode, plus its description."""
+    presets = load_presets()
+    preset = presets.get(detail_level) or presets['medium']
+    settings = dict(preset.get('app', {}))
+    settings.setdefault('detail_level', detail_level)
+    settings['description'] = preset.get('description', '')
+    return settings
 
 def set_progress_callback(callback):
     """Set a callback function for real-time progress updates (thread-safe)"""
@@ -197,60 +240,7 @@ def filter_images(image_path, interval):
     return image_path
 
 def run_colmap(image_path, matcher_type, interval, model_type, detail_level='medium', quality_mode=False, ultra_sharpness_mode=False, enable_dense_override=None, gpu_index=0, mvs_gpu_list=None):
-    # Load presets from JSON files, fall back to inline dict if not found
-    _json_presets = _load_presets()
-
-    # Inline fallback presets — used ONLY if the presets/ JSON directory is missing.
-    # Kept as a mirror of presets/*.json (low/medium/high/quality/expert); edit the
-    # JSON files to tune presets, not this dict.
-    detail_settings = {
-        'low': {
-            'features': 16384, 'peak': 0.006, 'tracks': 200000, 'octaves': 4,
-            'tri_angle': 0.25, 'reproj_error': 16.0, 'match_ratio': 0.9,
-            'dense': False,
-            'description': 'Fast Preview - Sparse only, ~50K-200K points, ~2-4 min'
-        },
-        'medium': {
-            'features': 32768, 'peak': 0.004, 'tracks': 500000, 'octaves': 5,
-            'tri_angle': 0.1, 'reproj_error': 24.0, 'match_ratio': 0.92,
-            'dense': False,
-            'description': 'Balanced Quality - Sparse only (MVS skipped: no benefit for Brush), ~5-10 min'
-        },
-        'high': {
-            'features': 0, 'peak': 0.0001, 'tracks': 10000000, 'octaves': 8,
-            'tri_angle': 0.01, 'reproj_error': 64.0, 'match_ratio': 0.98,
-            'ba_max_points': 10000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
-            'dense': False,
-            'force_quality': True,
-            'description': 'Quality sweet spot - unlimited SIFT, tight COLMAP BA, sparse only, ~10-20 min'
-        },
-        'quality': {
-            'features': 0, 'peak': 0.00005, 'tracks': 20000000, 'octaves': 8,
-            'tri_angle': 0.005, 'reproj_error': 96.0, 'match_ratio': 0.995,
-            'ba_max_points': 20000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
-            'dense': False,
-            'force_quality': True,
-            'description': 'Maximum practical quality - aggressive COLMAP, sparse only, ~20-40 min'
-        },
-        'expert': {
-            'features': 0, 'peak': 0.000005, 'tracks': 50000000, 'octaves': 8,
-            'tri_angle': 0.01, 'reproj_error': 128.0, 'match_ratio': 0.99,
-            'ba_max_points': 50000000, 'tri_complete_error': 64.0, 'tri_merge_error': 64.0,
-            'dense': False,
-            'expert': True,
-            'domain_size_pooling': True,
-            'affine_shape': True,
-            'guided_matching': True,
-            'max_image_size': 8192,
-            'refine_focal': True,
-            'refine_principal': True,
-            'refine_distortion': True,
-            'extract_colors': True,
-            'description': 'Expert - All COLMAP features, full lens calibration, sparse only'
-        },
-    }
-    # Use JSON presets if available, fall back to inline dict
-    detail_settings = _json_presets if _json_presets else detail_settings
+    detail_settings = load_presets()
     settings = detail_settings.get(detail_level, detail_settings['medium'])
 
     # High-quality SfM flags (closing the gap to RealityScan): applied to

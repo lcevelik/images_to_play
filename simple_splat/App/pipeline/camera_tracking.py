@@ -45,39 +45,36 @@ def extract_camera_poses(sparse_dir):
             },
             ...
         ]
+
+    Reads the *.bin files with the pure-struct parser so this works in the
+    bundled Python (no pycolmap). pycolmap is only used for .txt reconstructions.
     """
-    import pycolmap
-    
-    recon = pycolmap.Reconstruction(sparse_dir)
-    
+    imgs_bin = os.path.join(sparse_dir, 'images.bin')
+    cams_bin = os.path.join(sparse_dir, 'cameras.bin')
+    if os.path.exists(imgs_bin) and os.path.exists(cams_bin):
+        raw = _poses_from_bin(imgs_bin, cams_bin)
+    else:
+        raw = _poses_from_pycolmap(sparse_dir)
+
     poses = []
-    for image_id, image in recon.images.items():
-        cam = recon.cameras[image.camera_id]
-        
-        # pycolmap gives cam_from_world (world-to-camera) as 3x4
-        w2c_3x4 = np.array(image.cam_from_world().matrix(), dtype=np.float64)
-        
-        # Invert to get world-from-camera (camera-to-world)
-        R = w2c_3x4[:3, :3]
-        t = w2c_3x4[:3, 3]
-        
+    for name, R_w2c, t_w2c, cam in raw:
         # c2w = inverse of w2c
-        R_c2w = R.T
-        t_c2w = -R.T @ t
-        
+        R_c2w = R_w2c.T
+        t_c2w = -R_w2c.T @ t_w2c
+
         # Convert rotation matrix to quaternion (wxyz format)
         quat = _rotation_matrix_to_quaternion(R_c2w)
-        
+
         poses.append({
-            'name': image.name,
+            'name': name,
             'position': t_c2w.tolist(),
             'rotation_matrix': R_c2w.tolist(),
             'rotation_quat': [float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])],
-            'focal_length': float(cam.focal_length_x),
-            'width': cam.width,
-            'height': cam.height,
+            'focal_length': float(cam['f']),
+            'width': int(cam['w']),
+            'height': int(cam['h']),
         })
-    
+
     # Sort by filename in NATURAL order (frame order for video extraction).
     # Plain string sort puts frame_10 before frame_2 when numbers aren't
     # zero-padded, which scrambles the exported camera animation.
@@ -92,6 +89,35 @@ def extract_camera_poses(sparse_dir):
         pose['timestamp'] = i / 30.0  # default 30fps
     
     return poses
+
+
+def _poses_from_bin(imgs_bin, cams_bin):
+    """(name, R_w2c, t_w2c, {'w','h','f'}) per image, straight from the binaries."""
+    from pipeline.sparse_preview import _read_cameras_bin, _read_images_bin, _qvec2rotmat
+
+    cams = _read_cameras_bin(cams_bin)
+    out = []
+    for im in _read_images_bin(imgs_bin):
+        cam = cams.get(im['cam_id'])
+        if cam is None:
+            continue
+        out.append((im['name'], _qvec2rotmat(im['qvec']), np.asarray(im['tvec'], np.float64), cam))
+    return out
+
+
+def _poses_from_pycolmap(sparse_dir):
+    """Same tuples as _poses_from_bin, for .txt reconstructions."""
+    import pycolmap
+
+    recon = pycolmap.Reconstruction(sparse_dir)
+    out = []
+    for image in recon.images.values():
+        cam = recon.cameras[image.camera_id]
+        # pycolmap gives cam_from_world (world-to-camera) as 3x4
+        w2c_3x4 = np.array(image.cam_from_world().matrix(), dtype=np.float64)
+        out.append((image.name, w2c_3x4[:3, :3], w2c_3x4[:3, 3],
+                    {'w': cam.width, 'h': cam.height, 'f': cam.focal_length_x}))
+    return out
 
 
 def _rotation_matrix_to_quaternion(R):
@@ -434,22 +460,23 @@ def export_point_cloud_ply(sparse_dir, output_path, center=False):
     center defaults to False: the exported camera poses (FBX/GLTF/JSON) and the
     trained splat stay in the COLMAP frame, so centering the reference cloud at
     the origin would misalign it with everything else imported alongside it."""
-    import pycolmap
-    
-    recon = pycolmap.Reconstruction(sparse_dir)
-    
-    points = []
-    colors = []
-    for pid, point in recon.points3D.items():
-        points.append(point.xyz)
-        colors.append(point.color)
-    
-    if not points:
+    bin_path = os.path.join(sparse_dir, 'points3D.bin')
+    if os.path.exists(bin_path):
+        from pipeline.sparse_preview import _read_points3D_bin
+        xyz, rgb01 = _read_points3D_bin(bin_path)
+        pts = xyz.astype(np.float32)
+        cols = np.rint(rgb01 * 255.0).astype(np.uint8)
+    else:
+        import pycolmap
+        recon = pycolmap.Reconstruction(sparse_dir)
+        pairs = [(p.xyz, p.color) for p in recon.points3D.values()]
+        pts = np.array([p[0] for p in pairs], dtype=np.float32).reshape(-1, 3)
+        cols = np.array([p[1] for p in pairs], dtype=np.uint8).reshape(-1, 3)
+
+    if len(pts) == 0:
         return None
-    
-    pts = np.array(points, dtype=np.float32)
-    cols = np.array(colors, dtype=np.uint8)
-    
+
+
     if center:
         centroid = pts.mean(axis=0)
         pts -= centroid

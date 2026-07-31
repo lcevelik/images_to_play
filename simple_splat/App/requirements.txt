@@ -22,17 +22,35 @@ opencv-python==4.13.0.92
 # Process management (kill COLMAP/Brush jobs)
 psutil==7.2.2
 
-# Read COLMAP sparse reconstruction stats
-pycolmap==3.13.0
-
-# Required by pycolmap
+# Point cloud / COLMAP parsing
 numpy==2.4.2
 
 # ---------------------------------------------------------------------------
-# Optional: ML-Sharp (single-image fast processing) - NOT bundled
-# Install from source if needed:
-#   git clone https://github.com/apple/ml-sharp.git
-#   cd ml-sharp && pip install -r requirements.txt
-#   sharp --version
+# Optional — NOT bundled in the Lite package (which ships only the list above).
+# The pipeline degrades gracefully when these are missing: the sparse readers
+# fall back to pure-struct parsing, and the MCMC trainer is unavailable so the
+# app falls back to Brush.
 # ---------------------------------------------------------------------------
-pytorch-msssim
+
+# pycolmap — only needed to read .txt reconstructions and reconstruction stats.
+# The *.bin readers in pipeline/sparse_preview.py need no pycolmap.
+# pycolmap==3.13.0
+
+# MCMC / ADC trainer (CUDA, NVIDIA only). torch must be the +cu126 build:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+# gsplat JIT-compiles CUDA kernels on first use — needs MSVC cl.exe on PATH.
+# torch
+# torchvision
+# gsplat
+# pytorch-msssim     # SSIM loss — do NOT substitute a hand-rolled avg_pool SSIM
+# scipy
+# plyfile
+
+# Learned-SfM front-end (SuperPoint + LightGlue seeding)
+# lightglue @ git+https://github.com/cvg/LightGlue.git
+# kornia
+
+# ML-Sharp (single-image splat). Install from source:
+#   git clone https://github.com/apple/ml-sharp.git
+#   cd ml-sharp && pip install -e . --no-deps && pip install timm imageio pillow-heif
+# depth_seed.py additionally needs: transformers (Depth-Anything-V2)

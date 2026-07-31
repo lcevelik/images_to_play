@@ -7,5 +7,11 @@
   "reproj_error": 24.0,
   "match_ratio": 0.92,
   "dense": false,
-  "description": "Balanced Quality - Sparse only (MVS skipped: no benefit for Brush), ~5-10 min"
+  "description": "Balanced Quality - Sparse only (MVS skipped: no benefit for Brush), ~5-10 min",
+  "app": {
+    "detail_level": "medium",
+    "training_steps": 15000,
+    "max_image_size": 3200,
+    "quality_mode": false
+  }
 }

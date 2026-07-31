@@ -7,5 +7,11 @@
   "reproj_error": 16.0,
   "match_ratio": 0.9,
   "dense": false,
-  "description": "Fast Preview - Sparse only, ~50K-200K points, ~2-4 min"
+  "description": "Fast Preview - Sparse only, ~50K-200K points, ~2-4 min",
+  "app": {
+    "detail_level": "low",
+    "training_steps": 5000,
+    "max_image_size": 1600,
+    "quality_mode": false
+  }
 }

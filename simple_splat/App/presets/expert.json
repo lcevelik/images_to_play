@@ -1,6 +1,6 @@
 {
   "features": 0,
-  "peak": 0.000005,
+  "peak": 5e-06,
   "tracks": 50000000,
   "octaves": 8,
   "tri_angle": 0.01,
@@ -19,5 +19,11 @@
   "refine_principal": true,
   "refine_distortion": true,
   "extract_colors": true,
-  "description": "Expert - All COLMAP features, full lens calibration, sparse only"
+  "description": "Expert - All COLMAP features, full lens calibration, sparse only",
+  "app": {
+    "detail_level": "expert",
+    "training_steps": 100000,
+    "max_image_size": 8192,
+    "quality_mode": true
+  }
 }

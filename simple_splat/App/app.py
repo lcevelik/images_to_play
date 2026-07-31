@@ -48,13 +48,23 @@ import time
 # Image processing constants
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
 
-def resize_images_for_colmap(image_folder, max_size=3840):
+# Multiplier applied to a preset's training_steps
+QUALITY_SCALES = {'draft': 0.3, 'standard': 1.0, 'cinematic': 2.0}
+
+def resize_images_for_colmap(image_folder, max_size=3840, backup_folder=None):
     """Downscale images larger than max_size to save COLMAP time.
-    4K images slow COLMAP 16x vs 2K. Returns count of resized images.
-    Uses ThreadPoolExecutor for parallel resize (PIL releases GIL during I/O)."""
+    4K images slow COLMAP 16x vs 2K. Returns (resized_count, failures).
+    Uses ThreadPoolExecutor for parallel resize (PIL releases GIL during I/O).
+
+    The resize is destructive (it rewrites the file in place), so when
+    backup_folder is given each original is copied there first — otherwise a
+    downscaled upload can never be reprocessed at full resolution."""
     from PIL import Image
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
     import multiprocessing
+
+    if backup_folder:
+        os.makedirs(backup_folder, exist_ok=True)
 
     def _resize_one(args):
         fpath, max_size = args
@@ -64,14 +74,19 @@ def resize_images_for_colmap(image_folder, max_size=3840):
             with Image.open(fpath) as img:
                 w, h = img.size
                 if max(w, h) <= max_size:
-                    return False
+                    return False, None
                 scale = max_size / max(w, h)
                 resized_img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            if backup_folder:
+                dst = os.path.join(backup_folder, os.path.basename(fpath))
+                if not os.path.exists(dst):
+                    shutil.copy2(fpath, dst)
             resized_img.save(fpath, quality=95)
-            return True
-        except Exception:
-            pass
-        return False
+            return True, None
+        except Exception as e:
+            # Report rather than swallow: a failure here means COLMAP silently
+            # runs on an oversized (or corrupt) image.
+            return False, f"{os.path.basename(fpath)}: {e}"
 
     tasks = []
     for fname in os.listdir(image_folder):
@@ -79,12 +94,39 @@ def resize_images_for_colmap(image_folder, max_size=3840):
             tasks.append((os.path.join(image_folder, fname), max_size))
 
     resized = 0
+    failures = []
     workers = min(multiprocessing.cpu_count(), 8)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for result in pool.map(_resize_one, tasks):
-            if result:
+        for ok, err in pool.map(_resize_one, tasks):
+            if ok:
                 resized += 1
-    return resized
+            elif err:
+                failures.append(err)
+    return resized, failures
+
+def add_msvc_to_path():
+    """Put MSVC's cl.exe on PATH so gsplat can JIT-compile its CUDA kernels.
+    Searches all VS versions (2022 before 2019) and editions.
+    Returns the directory added, or None if no cl.exe was found."""
+    vs_roots = [
+        r"C:\Program Files\Microsoft Visual Studio",
+        r"C:\Program Files (x86)\Microsoft Visual Studio",
+    ]
+    for vs_root in vs_roots:
+        if not os.path.exists(vs_root):
+            continue
+        for year in sorted(os.listdir(vs_root), reverse=True):  # 2022 before 2019
+            for edition in ("BuildTools", "Enterprise", "Professional", "Community"):
+                msvc_bin = os.path.join(vs_root, year, edition, "VC", "Tools", "MSVC")
+                if not os.path.exists(msvc_bin):
+                    continue
+                for v in sorted(os.listdir(msvc_bin), reverse=True):
+                    cl_dir = os.path.join(msvc_bin, v, "bin", "Hostx64", "x64")
+                    if os.path.exists(os.path.join(cl_dir, "cl.exe")):
+                        if cl_dir not in os.environ.get("PATH", ""):
+                            os.environ["PATH"] = cl_dir + ";" + os.environ.get("PATH", "")
+                        return cl_dir
+    return None
 
 def filter_blurry_images(image_folder, blur_threshold=100.0):
     """Detect blurry images using Laplacian variance. Returns list of (filename, score).
@@ -122,7 +164,8 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max file size
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'zip', 'mp4', 'mov', 'avi', 'mkv', 'webm'}
 
 # Memory management settings
-MAX_CONCURRENT_JOBS = 3  # Limit concurrent processing jobs to prevent memory exhaustion
+# MAX_CONCURRENT_JOBS is derived from GPU_COUNT below (training is GPU-bound, so
+# more concurrent jobs than GPUs just makes every job slower and risks OOM).
 JOB_RETENTION_HOURS = 1  # Keep completed jobs in memory for 1 hour
 AUTO_CLEANUP_HOURS = 24  # Auto-cleanup job folders after 24 hours
 
@@ -182,10 +225,26 @@ def _save_job_status(job_id):
         if 'logs' in status:
             status['logs'] = list(status['logs'])
         status_path = os.path.join(_STATUS_DIR, f'{job_id}.json')
-        with open(status_path, 'w') as f:
+        # Write-then-rename: a crash mid-write would otherwise leave a truncated
+        # file that _load_job_status can't parse, losing the job on restart.
+        tmp_path = status_path + '.tmp'
+        with open(tmp_path, 'w') as f:
             json.dump(status, f, default=str)
+        os.replace(tmp_path, status_path)
     except Exception:
         pass
+
+def _job_folder(job_id):
+    """Absolute path to a job's folder, or None if job_id isn't a UUID.
+
+    Every job id the app hands out is a uuid4, so anything else is either a typo
+    or a traversal attempt ('../../etc') — reject it before it reaches the
+    filesystem rather than trusting the caller's string."""
+    try:
+        uuid.UUID(str(job_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return os.path.abspath(os.path.join(app.config['PROCESSING_FOLDER'], str(job_id)))
 
 def _load_job_status(job_id):
     """Load a job's status from JSON file (for recovery after restart)."""
@@ -215,6 +274,13 @@ def _detect_gpu_count():
     return 1
 
 GPU_COUNT = _detect_gpu_count()
+
+# One heavy job per GPU. Two trainers on one GPU collide (VRAM + kernel contention)
+# and both run slower than they would in sequence. Override with SPLAT_MAX_JOBS.
+try:
+    MAX_CONCURRENT_JOBS = max(1, int(os.environ.get('SPLAT_MAX_JOBS', GPU_COUNT)))
+except ValueError:
+    MAX_CONCURRENT_JOBS = GPU_COUNT
 
 def assign_gpu(job_id):
     """Pick the least-loaded GPU index for a new job and record it."""
@@ -321,28 +387,46 @@ def cleanup_old_jobs(max_age_hours=24):
                     print(f"Error cleaning up {job_folder}: {e}")
 
 def cleanup_all_jobs():
-    """Clean up all processing folders"""
+    """Clean up all processing folders. Running jobs are skipped — deleting a job
+    folder out from under a live COLMAP/trainer subprocess kills it mid-write."""
     processing_folder = app.config['PROCESSING_FOLDER']
 
     # Check if processing folder exists
     if not os.path.exists(processing_folder):
         print("Processing folder does not exist, nothing to clean up")
-        return
+        return 0, []
 
+    with log_lock:
+        active = {
+            jid for jid, st in processing_status.items()
+            if st.get('status') == 'processing'
+        }
+
+    removed = 0
+    skipped = []
     # Clean up job folders
     for job_folder in os.listdir(processing_folder):
         job_path = os.path.join(processing_folder, job_folder)
-        if os.path.isdir(job_path):
-            try:
-                shutil.rmtree(job_path)
-                print(f"Cleaned up job: {job_folder}")
-            except Exception as e:
-                print(f"Error cleaning up {job_folder}: {e}")
+        if not os.path.isdir(job_path):
+            continue
+        if job_folder in active:
+            skipped.append(job_folder)
+            print(f"Skipped running job: {job_folder}")
+            continue
+        try:
+            shutil.rmtree(job_path)
+            removed += 1
+            print(f"Cleaned up job: {job_folder}")
+        except Exception as e:
+            print(f"Error cleaning up {job_folder}: {e}")
 
-    # Clear status dicts with proper locking
+    # Drop the finished jobs from memory, keeping the ones still running
     with log_lock:
-        processing_status.clear()
-        job_start_times.clear()
+        for jid in [j for j in processing_status if j not in active]:
+            processing_status.pop(jid, None)
+            job_start_times.pop(jid, None)
+
+    return removed, skipped
 
 def get_active_jobs_count():
     """Get count of currently processing jobs (excludes fast ML-Sharp jobs)"""
@@ -526,55 +610,297 @@ def extract_zip(zip_path, extract_to):
 
     return extract_to
 
+def _prepare_brush_images(parent_dir):
+    """Brush trains from parent_dir/images. Prefer COLMAP's undistorted output;
+    fall back to the raw source/input folders if undistortion produced nothing."""
+    images_folder = os.path.join(parent_dir, 'images')
+
+    def count_images(folder):
+        if os.path.exists(folder):
+            return len([f for f in os.listdir(folder) if f.lower().endswith(IMAGE_EXTENSIONS)])
+        return 0
+
+    images_count = count_images(images_folder)
+    if images_count > 0:
+        add_log(f"Using undistorted images folder ({images_count} images)", "INFO")
+        return images_folder
+
+    source_folder = os.path.join(parent_dir, 'source')
+    input_folder = os.path.join(parent_dir, 'input')
+    source_count = count_images(source_folder)
+    input_count = count_images(input_folder)
+    add_log(f"No undistorted images found, checking source/input "
+            f"(source: {source_count}, input: {input_count})", "INFO")
+    for label, folder, count in (('source', source_folder, source_count),
+                                 ('input', input_folder, input_count)):
+        if count > 0:
+            if os.path.exists(images_folder):
+                shutil.rmtree(images_folder)
+            shutil.copytree(folder, images_folder)
+            add_log(f"Created images folder from {label} ({count} images)", "INFO")
+            return images_folder
+
+    add_log(f"Warning: images folder not found at {images_folder}", "WARNING")
+    return None
+
+
+def train_with_brush(job_id, parent_dir, training_steps, config, job_gpu, train_pct_start):
+    """Run Brush on a finished COLMAP reconstruction.
+
+    Returns the path to parent_dir/gaussian_splat.ply, or None if Brush is
+    missing, crashed, or wrote no usable checkpoint (the caller then falls back
+    to the sparse point cloud)."""
+    from pipeline.run_glomap import find_brush_binary
+    brush_path = find_brush_binary()
+    if not brush_path:
+        add_log("Brush not found - will generate PLY from sparse reconstruction", "INFO")
+        return None
+    add_log(f"Brush found at: {brush_path}", "INFO")
+
+    try:
+        images_folder = _prepare_brush_images(parent_dir)
+        if images_folder:
+            image_files = [f for f in os.listdir(images_folder)
+                           if f.lower().endswith(IMAGE_EXTENSIONS)]
+            add_log(f"Found {len(image_files)} images for Brush training", "INFO")
+
+        # Run Brush training
+        add_log(f"Training with {training_steps} steps", "INFO")
+        export_path = parent_dir
+
+        sharpness_boost_enabled = config.get('sharpness_boost', False)
+        grad_threshold = "0.00002" if sharpness_boost_enabled else "0.00004"
+        growth_fraction = "0.15" if sharpness_boost_enabled else "0.1"
+        refine_every = "100" if sharpness_boost_enabled else "150"
+        # Sharpness gets 2560; all other presets get 1920 (was 1280, below Brush's own default)
+        max_res = "2560" if sharpness_boost_enabled else "1920"
+        # Scale densification window with run length; default 15K stops too early on long runs
+        growth_stop = max(15000, min(int(training_steps * 0.5), 80000))
+
+        # Brush's LPIPS pre-allocates a hardcoded 2.25 GB CubeCL buffer (9×2^28 bytes)
+        # that always exceeds wgpu's 2 GB maxBindingSize limit — no flag can change
+        # this without recompiling Brush. LPIPS is available via the MCMC trainer
+        # (PyTorch/CUDA, no buffer limit). Brush always runs without LPIPS.
+
+        # Export checkpoints PERIODICALLY so a timeout/crash still leaves a usable splat.
+        # export_name uses Brush's {iter} token so each export is a NUMBERED file
+        # (export_5000.ply, export_10000.ply, ...) — that lets us read the real step
+        # for accurate progress. A fixed name (no {iter}) overwrites one unnumbered file.
+        export_interval = max(2000, training_steps // 10)
+
+        brush_cmd = [
+            brush_path,
+            parent_dir,
+            # NOTE: Brush v0.3.0's `--with-viewer` is a no-value flag in the compiled
+            # binary (it rejects `--with-viewer false`). We therefore DON'T pass it —
+            # the run works (a viewer window may open). True headless syntax for this
+            # build is unconfirmed; verify with `brush_app.exe --help` before re-adding.
+            "--total-steps", str(training_steps),
+            "--export-path", export_path,
+            "--export-name", "export_{iter}.ply",
+            "--export-every", str(export_interval),
+            "--max-resolution", max_res,
+            "--growth-grad-threshold", grad_threshold,
+            "--growth-select-fraction", growth_fraction,
+            "--refine-every", refine_every,
+            "--growth-stop-iter", str(growth_stop),
+        ]
+
+        add_log(f"Quality settings: grad_threshold={grad_threshold}, max_res={max_res}, growth_stop={growth_stop}", "INFO")
+        add_log(f"Starting Brush training with {training_steps} steps...", "INFO")
+        add_log(f"Brush command: {' '.join(brush_cmd)}", "DEBUG")
+        processing_status[job_id]['step'] = f'Training Gaussian Splats (0/{training_steps} steps)...'
+
+        timeout_seconds = max(7200, (training_steps // 500) * 60 + 3600)
+        # Brush uses CubeCL (Burn framework) which does NOT support multi-GPU.
+        # Exposing CUDA_VISIBLE_DEVICES=0,1 causes BufferTooBig panic at ~2.25 GB.
+        # Always pin Brush to a single GPU.
+        brush_env = gpu_env(job_gpu)
+        add_log(f"Brush pinned to GPU {job_gpu} (CubeCL single-GPU only)", "INFO")
+        process = subprocess.Popen(
+            brush_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=brush_env
+        )
+
+        # Stream Brush stdout in a background thread so readline() never blocks the progress loop
+        training_start = time.time()
+        last_progress_time = [0]
+        brush_current_step = [0]
+
+        def _read_brush_stdout():
+            for raw in process.stdout:
+                line = raw.strip()
+                if not line:
+                    continue
+                add_log(f"Brush: {line}", "DEBUG")
+                step_match = re.search(r'[Ss]tep[:\s]+(\d+)\s*/?\s*(\d+)?', line)
+                if step_match:
+                    brush_current_step[0] = int(step_match.group(1))
+
+        stdout_thread = threading.Thread(target=_read_brush_stdout, daemon=True)
+        stdout_thread.start()
+
+        # brush_app.exe (GUI-subsystem build) writes nothing to our stdout pipe, so the
+        # parser above stays at 0. The reliable progress signal is the export_<step>.ply
+        # checkpoints Brush drops on disk. Watch those. point_cloud.ply (sparse fallback)
+        # and dense/fused.ply share this folder and are NOT trained splats — exclude them.
+        _brush_export_re = re.compile(r'(\d+)\.ply$')
+
+        def _brush_checkpoints():
+            """Brush .ply checkpoints from THIS run, newest first: [(path, mtime, step)]."""
+            out = []
+            for p in Path(export_path).glob('*.ply'):
+                if p.name in ('point_cloud.ply', 'fused.ply'):
+                    continue
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime < training_start - 5:   # predates this run → stale
+                    continue
+                m = _brush_export_re.search(p.name)
+                out.append((str(p), mtime, int(m.group(1)) if m else None))
+            out.sort(key=lambda c: c[1], reverse=True)
+            return out
+
+        last_info_log_step = [0]
+        brush_timed_out = False
+        # Brush (GUI build) writes no stdout AND overwrites a single fixed-name export
+        # every interval (no step in the filename). So we can't read the step directly.
+        # Instead we COUNT export events (each new mtime on the export file = one more
+        # `export_interval` steps done) and calibrate a real step-rate from them. The
+        # ETA then reflects Brush's actual measured speed on this scene/hardware, which
+        # is the only honest source — a hardcoded guess is what made the last ETA wrong.
+        export_events = 0
+        last_ckpt_mtime = None
+        calib_steps = 0      # steps confirmed by the latest export event
+        calib_time = 0.0     # elapsed time at that event
+        while process.poll() is None:
+            elapsed = time.time() - training_start
+
+            ckpts = _brush_checkpoints()
+            newest_mtime = ckpts[0][1] if ckpts else None
+            if newest_mtime is not None and newest_mtime != last_ckpt_mtime:
+                last_ckpt_mtime = newest_mtime
+                export_events += 1
+                calib_steps = export_events * export_interval
+                calib_time = elapsed
+                add_log(f"[Brush] Checkpoint #{export_events} written (~{calib_steps}/{training_steps} steps, {int(elapsed)}s elapsed)", "INFO")
+            # A numbered filename, or a real stdout step, overrides the estimate (exact)
+            fs_step_named = next((s for _p, _m, s in ckpts if s is not None), 0)
+            exact_step = max(brush_current_step[0], fs_step_named)
+            if exact_step > 0:
+                calib_steps, calib_time = exact_step, elapsed
+
+            if calib_steps > 0 and calib_time > 0:
+                # Measured rate from real progress → smooth, self-correcting ETA.
+                rate = calib_steps / calib_time          # steps per second
+                est_step = min(int(rate * elapsed), training_steps - 1)
+                pct = min(99, train_pct_start + int((99 - train_pct_start) * est_step / training_steps))
+                eta = int((training_steps - est_step) / rate) if rate > 0 else None
+                processing_status[job_id]['progress'] = pct
+                processing_status[job_id]['eta_seconds'] = eta
+                eta_str = f", ~{eta // 60}m {eta % 60}s left" if eta else ""
+                processing_status[job_id]['step'] = f'Training Gaussian Splats (~{est_step}/{training_steps} steps{eta_str})'
+                if est_step - last_info_log_step[0] >= 5000:
+                    last_info_log_step[0] = est_step
+                    add_log(f"[Brush] ~Step {est_step}/{training_steps} ({pct}%) — {int(elapsed)}s elapsed", "INFO")
+            else:
+                # Before the first export we have no rate. Hold at the band start and show
+                # elapsed only (no fabricated ETA — that's what misled last time).
+                processing_status[job_id]['progress'] = train_pct_start
+                processing_status[job_id]['eta_seconds'] = None
+                processing_status[job_id]['step'] = f'Training Gaussian Splats (warming up, {int(elapsed)}s elapsed)...'
+                if elapsed > 30 and time.time() - last_progress_time[0] > 60:
+                    last_progress_time[0] = time.time()
+                    add_log(f"[Brush] Training — {int(elapsed)}s elapsed, awaiting first checkpoint (every {export_interval} steps); Brush renders in its own window", "INFO")
+
+            if elapsed > timeout_seconds:
+                process.kill()
+                try:
+                    process.wait(timeout=30)  # reap so returncode is set, not None
+                except subprocess.TimeoutExpired:
+                    pass  # still salvage the checkpoint below
+                brush_timed_out = True
+                add_log(f"Brush exceeded time budget ({timeout_seconds}s) — stopping and salvaging latest checkpoint", "WARNING")
+                break
+            time.sleep(5)
+
+        stdout_thread.join(timeout=10)
+
+        result_code = process.returncode
+        add_log(f"Brush exited with return code: {result_code}", "INFO")
+
+        # Pick the most-progressed real checkpoint Brush wrote. This unifies the
+        # clean-finish and timeout-salvage paths: a periodic export from step N is a
+        # complete, viewable splat even if training never reached total-steps. We take
+        # the highest step (best quality), falling back to newest-by-mtime if exports
+        # are unnumbered. Tiny/empty files (<1 KB) are skipped as failures.
+        ckpts = _brush_checkpoints()
+        numbered = [c for c in ckpts if c[2] is not None]
+        ordered = sorted(numbered, key=lambda c: c[2], reverse=True) + \
+                  [c for c in ckpts if c[2] is None]
+        found_ply, found_step = None, None
+        for path, _mtime, step in ordered:
+            if os.path.getsize(path) > 1024:
+                found_ply, found_step = path, step
+                break
+
+        if not found_ply:
+            # No usable checkpoint. Return None so the caller runs the explicit
+            # COLMAP sparse fallback and labels it honestly.
+            if brush_timed_out:
+                add_log(f"Brush timed out before writing any checkpoint (export interval "
+                        f"{export_interval} steps not reached). Reduce training steps or raise the time budget.", "ERROR")
+            elif result_code not in (0, None):
+                add_log(f"Brush failed with code {result_code} and wrote no usable PLY", "ERROR")
+            else:
+                add_log(f"Brush exited but produced no usable splat PLY in {export_path}", "WARNING")
+            return None
+
+        output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
+        if os.path.abspath(found_ply) != os.path.abspath(output_ply):
+            shutil.copy(found_ply, output_ply)
+
+        # Prune near-invisible Gaussians — removes ~50% with no visible quality change
+        try:
+            from pipeline.gaussian_splat_utils import prune_gaussian_ply
+            orig, kept = prune_gaussian_ply(output_ply, opacity_threshold=0.005)
+            if orig > 0:
+                reduction = (1 - kept / orig) * 100
+                ply_size = os.path.getsize(output_ply) / (1024 * 1024)
+                add_log(f"[Prune] {orig:,} → {kept:,} Gaussians ({reduction:.0f}% removed) → {ply_size:.1f} MB", "INFO")
+        except Exception as e:
+            add_log(f"[Prune] skipped: {e}", "WARNING")
+
+        ply_size = os.path.getsize(output_ply) / (1024 * 1024)
+        if brush_timed_out:
+            step_note = f" at step {found_step}/{training_steps}" if found_step else ""
+            add_log(f"Brush hit the time budget — salvaged latest checkpoint{step_note} "
+                    f"({ply_size:.2f} MB). Usable, but lower quality than a full run.", "WARNING")
+        else:
+            add_log(f"Brush training complete! Output: {output_ply} ({ply_size:.2f} MB)", "INFO")
+        return output_ply
+
+    except Exception as e:
+        add_log(f"Error running Brush: {e}", "ERROR")
+        return None
+
+
 def process_images_async(job_id, image_path, preset='medium', matcher_type='exhaustive_matcher', interval=1, advanced_settings=None, quality_scale=1.0):
     """Process images using COLMAP/GLOMAP pipeline with optional dense reconstruction"""
     try:
-        # Preset configuration - maps simple presets to detailed settings
-        preset_configs = {
-            'low': {
-                'detail_level': 'low',
-                'training_steps': 5000,
-                'enable_dense': False,
-                'max_image_size': 1600,
-                'quality_mode': False,
-                'description': 'Fast Preview - Sparse only, ~2-4 min'
-            },
-            'medium': {
-                'detail_level': 'medium',
-                'training_steps': 15000,
-                'enable_dense': False,
-                'max_image_size': 3200,
-                'quality_mode': False,
-                'description': 'Daily Use - Sparse, LPIPS on, ~8-15 min'
-            },
-            'high': {
-                'detail_level': 'high',
-                'training_steps': 30000,
-                'enable_dense': False,
-                'max_image_size': 4800,
-                'quality_mode': True,
-                'description': 'Quality sweet spot - unlimited SIFT, tight BA, ~15-30 min'
-            },
-            'quality': {
-                'detail_level': 'quality',
-                'training_steps': 60000,
-                'enable_dense': False,
-                'max_image_size': 4800,
-                'quality_mode': True,
-                'description': 'Maximum practical quality - aggressive COLMAP, ~30-60 min'
-            },
-            'expert': {
-                'detail_level': 'expert',
-                'training_steps': 100000,
-                'enable_dense': False,
-                'max_image_size': 8192,
-                'quality_mode': True,
-                'description': 'Expert - All COLMAP features, full lens calibration'
-            },
-        }
-
-        # Get preset config or default to medium
-        config = preset_configs.get(preset, preset_configs['medium'])
+        # Preset settings come from presets/*.json — the single source of truth for
+        # both the COLMAP parameters (read by run_colmap) and these app-layer ones.
+        from pipeline.run_glomap import get_app_settings
+        config = get_app_settings(preset)
+        # None means "let the preset's own `dense` flag decide" (run_colmap treats a
+        # None override as no override). Only an explicit user choice forces MVS.
+        config['enable_dense'] = None
         config['quality_scale'] = quality_scale
 
         # Allow advanced settings to override preset (skip None values to preserve preset defaults)
@@ -657,12 +983,15 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 # Close the parent's copy of the log handle after spawning — the child
                 # holds its own; keeping ours open leaks one handle per recipe job.
                 with open(os.path.join(_job_dir, 'recipe_spawn.log'), 'w') as _spawn_log:
-                    subprocess.Popen(_cmd, stdout=_spawn_log, stderr=subprocess.STDOUT,
-                                     creationflags=_flags, close_fds=True)
+                    _proc = subprocess.Popen(_cmd, stdout=_spawn_log, stderr=subprocess.STDOUT,
+                                             creationflags=_flags, close_fds=True)
                 add_log(f"[RECIPE] {_quality.upper()} pipeline launched (detached — survives server restarts)", "INFO")
                 processing_status[job_id]['step'] = f'{_quality.title()} pipeline starting...'
                 processing_status[job_id]['status'] = 'processing'
                 processing_status[job_id]['is_recipe'] = True
+                # Record the PID so /kill can stop the detached tree. Without it a
+                # cancelled recipe keeps running (and holding the GPU) invisibly.
+                processing_status[job_id]['recipe_pid'] = _proc.pid
                 _save_job_status(job_id)
                 return
             except Exception as _re:
@@ -701,33 +1030,10 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         add_log(f"COLMAP cached at: {colmap_path}", "INFO")
 
         # Add MSVC cl.exe to PATH for gsplat JIT CUDA kernel compilation.
-        # Search across all VS versions and editions (BuildTools, Community, Professional, Enterprise).
-        _vs_roots = [
-            r"C:\Program Files\Microsoft Visual Studio",
-            r"C:\Program Files (x86)\Microsoft Visual Studio",
-        ]
-        _cl_found = False
-        for _vs_root in _vs_roots:
-            if _cl_found or not os.path.exists(_vs_root):
-                continue
-            for _year in sorted(os.listdir(_vs_root), reverse=True):  # 2022 before 2019
-                for _edition in ["BuildTools", "Enterprise", "Professional", "Community"]:
-                    _msvc_bin = os.path.join(_vs_root, _year, _edition, "VC", "Tools", "MSVC")
-                    if not os.path.exists(_msvc_bin):
-                        continue
-                    for _v in sorted(os.listdir(_msvc_bin), reverse=True):
-                        _cl_dir = os.path.join(_msvc_bin, _v, "bin", "Hostx64", "x64")
-                        if os.path.exists(os.path.join(_cl_dir, "cl.exe")):
-                            if _cl_dir not in os.environ.get("PATH", ""):
-                                os.environ["PATH"] = _cl_dir + ";" + os.environ.get("PATH", "")
-                            add_log(f"MSVC cl.exe found at: {_cl_dir}", "INFO")
-                            _cl_found = True
-                            break
-                    if _cl_found:
-                        break
-                if _cl_found:
-                    break
-        if not _cl_found:
+        _cl_dir = add_msvc_to_path()
+        if _cl_dir:
+            add_log(f"MSVC cl.exe found at: {_cl_dir}", "INFO")
+        else:
             add_log("MSVC cl.exe not found — gsplat JIT compilation may fail. Install VS Build Tools.", "WARNING")
 
         # Check for COLMAP global_mapper (COLMAP 4.0+, replaces standalone GLOMAP)
@@ -750,12 +1056,18 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         add_log("=" * 50, "INFO")
         add_log("Hardware: COLMAP auto-detects GPU/CPU (uses CUDA if available)", "INFO")
 
-        # Pre-process images: resize large images and detect blurry ones
+        # Pre-process images: resize large images and detect blurry ones.
+        # The resize is in-place, so keep the untouched originals alongside it.
         max_image_size = config.get('max_image_size', 3840)
         if max_image_size and max_image_size > 0:
-            resized = resize_images_for_colmap(image_path, max_size=max_image_size)
+            originals_dir = os.path.join(os.path.dirname(image_path), 'source_original')
+            resized, resize_failures = resize_images_for_colmap(
+                image_path, max_size=max_image_size, backup_folder=originals_dir)
             if resized > 0:
-                add_log(f"Resized {resized} images to max {max_image_size}px", "INFO")
+                add_log(f"Resized {resized} images to max {max_image_size}px "
+                        f"(originals kept in source_original/)", "INFO")
+            for err in resize_failures:
+                add_log(f"Resize failed — COLMAP will use the file as-is: {err}", "WARNING")
 
         blurry = filter_blurry_images(image_path, blur_threshold=100.0)
         if blurry:
@@ -949,297 +1261,14 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             except Exception as e:
                 add_log(f"MCMC trainer failed ({e}) — falling back to Brush", "WARNING")
 
+        # --- Brush branch (default trainer, and the fallback when MCMC fails) ---
         if not ply_generated:
-            # Check if Brush is available - try multiple installation locations
-            _app_dir_brush = os.path.dirname(os.path.abspath(__file__))
-            _project_root_brush = os.path.dirname(_app_dir_brush)
-            _bundled_brush = os.path.join(_project_root_brush, 'Brush', 'brush_app.exe')
-            brush_paths = [
-                _bundled_brush,           # Bundled Brush (highest priority)
-                r"C:\Brush\brush_app.exe",
-                r"C:\Brush\brush.exe",
-                "brush_app",  # Check PATH
-                "brush",      # Check PATH
-            ]
-
-            brush_path = None
-            for path in brush_paths:
-                if os.path.isabs(path) and os.path.exists(path):
-                    brush_path = path
-                    break
-                else:
-                    found = shutil.which(path)
-                    if found:
-                        brush_path = found
-                        break
-
-            brush_available = brush_path is not None
-            if brush_available:
-                add_log(f"Brush found at: {brush_path}", "INFO")
-            else:
-                add_log("Brush not found - will generate PLY from sparse reconstruction", "INFO")
-
-            if brush_available:
-                try:
-                    images_folder = os.path.join(parent_dir, 'images')
-                    source_folder = os.path.join(parent_dir, 'source')
-                    input_folder = os.path.join(parent_dir, 'input')
-
-                    def count_images(folder):
-                        if os.path.exists(folder):
-                            return len([f for f in os.listdir(folder) if f.lower().endswith(IMAGE_EXTENSIONS)])
-                        return 0
-
-                    images_count = count_images(images_folder)
-
-                    if images_count > 0:
-                        add_log(f"Using undistorted images folder ({images_count} images)", "INFO")
-                    else:
-                        source_count = count_images(source_folder)
-                        input_count = count_images(input_folder)
-                        add_log(f"No undistorted images found, checking source/input (source: {source_count}, input: {input_count})", "INFO")
-                        if source_count > 0:
-                            if os.path.exists(images_folder):
-                                shutil.rmtree(images_folder)
-                            shutil.copytree(source_folder, images_folder)
-                            add_log(f"Created images folder from source ({source_count} images)", "INFO")
-                        elif input_count > 0:
-                            if os.path.exists(images_folder):
-                                shutil.rmtree(images_folder)
-                            shutil.copytree(input_folder, images_folder)
-                            add_log(f"Created images folder from input ({input_count} images)", "INFO")
-
-                    if os.path.exists(images_folder):
-                        image_files = [f for f in os.listdir(images_folder)
-                                      if f.lower().endswith(IMAGE_EXTENSIONS)]
-                        add_log(f"Found {len(image_files)} images for Brush training", "INFO")
-                    else:
-                        add_log(f"Warning: images folder not found at {images_folder}", "WARNING")
-
-                    # Run Brush training
-                    add_log(f"Training with {training_steps} steps", "INFO")
-                    export_path = parent_dir
-
-                    sharpness_boost_enabled = config.get('sharpness_boost', False)
-                    grad_threshold = "0.00002" if sharpness_boost_enabled else "0.00004"
-                    growth_fraction = "0.15" if sharpness_boost_enabled else "0.1"
-                    refine_every = "100" if sharpness_boost_enabled else "150"
-                    # Sharpness gets 2560; all other presets get 1920 (was 1280, below Brush's own default)
-                    max_res = "2560" if sharpness_boost_enabled else "1920"
-                    # Scale densification window with run length; default 15K stops too early on long runs
-                    growth_stop = max(15000, min(int(training_steps * 0.5), 80000))
-
-                    # Brush's LPIPS pre-allocates a hardcoded 2.25 GB CubeCL buffer (9×2^28 bytes)
-                    # that always exceeds wgpu's 2 GB maxBindingSize limit — no flag can change
-                    # this without recompiling Brush. LPIPS is available via the MCMC trainer
-                    # (PyTorch/CUDA, no buffer limit). Brush always runs without LPIPS.
-
-                    # Export checkpoints PERIODICALLY so a timeout/crash still leaves a usable splat.
-                    # export_name uses Brush's {iter} token so each export is a NUMBERED file
-                    # (export_5000.ply, export_10000.ply, ...) — that lets us read the real step
-                    # for accurate progress. A fixed name (no {iter}) overwrites one unnumbered file.
-                    export_interval = max(2000, training_steps // 10)
-
-                    brush_cmd = [
-                        brush_path,
-                        parent_dir,
-                        # NOTE: Brush v0.3.0's `--with-viewer` is a no-value flag in the compiled
-                        # binary (it rejects `--with-viewer false`). We therefore DON'T pass it —
-                        # the run works (a viewer window may open). True headless syntax for this
-                        # build is unconfirmed; verify with `brush_app.exe --help` before re-adding.
-                        "--total-steps", str(training_steps),
-                        "--export-path", export_path,
-                        "--export-name", "export_{iter}.ply",
-                        "--export-every", str(export_interval),
-                        "--max-resolution", max_res,
-                        "--growth-grad-threshold", grad_threshold,
-                        "--growth-select-fraction", growth_fraction,
-                        "--refine-every", refine_every,
-                        "--growth-stop-iter", str(growth_stop),
-                    ]
-
-                    add_log(f"Quality settings: grad_threshold={grad_threshold}, max_res={max_res}, growth_stop={growth_stop}", "INFO")
-                    add_log(f"Starting Brush training with {training_steps} steps...", "INFO")
-                    add_log(f"Brush command: {' '.join(brush_cmd)}", "DEBUG")
-                    processing_status[job_id]['step'] = f'Training Gaussian Splats (0/{training_steps} steps)...'
-
-                    timeout_seconds = max(7200, (training_steps // 500) * 60 + 3600)
-                    # Brush uses CubeCL (Burn framework) which does NOT support multi-GPU.
-                    # Exposing CUDA_VISIBLE_DEVICES=0,1 causes BufferTooBig panic at ~2.25 GB.
-                    # Always pin Brush to a single GPU.
-                    brush_env = gpu_env(job_gpu)
-                    add_log(f"Brush pinned to GPU {job_gpu} (CubeCL single-GPU only)", "INFO")
-                    process = subprocess.Popen(
-                        brush_cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                        env=brush_env
-                    )
-
-                    # Stream Brush stdout in a background thread so readline() never blocks the progress loop
-                    training_start = time.time()
-                    last_progress_time = [0]
-                    brush_current_step = [0]
-
-                    def _read_brush_stdout():
-                        for raw in process.stdout:
-                            line = raw.strip()
-                            if not line:
-                                continue
-                            add_log(f"Brush: {line}", "DEBUG")
-                            step_match = re.search(r'[Ss]tep[:\s]+(\d+)\s*/?\s*(\d+)?', line)
-                            if step_match:
-                                brush_current_step[0] = int(step_match.group(1))
-
-                    stdout_thread = threading.Thread(target=_read_brush_stdout, daemon=True)
-                    stdout_thread.start()
-
-                    # brush_app.exe (GUI-subsystem build) writes nothing to our stdout pipe, so the
-                    # parser above stays at 0. The reliable progress signal is the export_<step>.ply
-                    # checkpoints Brush drops on disk. Watch those. point_cloud.ply (sparse fallback)
-                    # and dense/fused.ply share this folder and are NOT trained splats — exclude them.
-                    _brush_export_re = re.compile(r'(\d+)\.ply$')
-
-                    def _brush_checkpoints():
-                        """Brush .ply checkpoints from THIS run, newest first: [(path, mtime, step)]."""
-                        out = []
-                        for p in Path(export_path).glob('*.ply'):
-                            if p.name in ('point_cloud.ply', 'fused.ply'):
-                                continue
-                            try:
-                                mtime = p.stat().st_mtime
-                            except OSError:
-                                continue
-                            if mtime < training_start - 5:   # predates this run → stale
-                                continue
-                            m = _brush_export_re.search(p.name)
-                            out.append((str(p), mtime, int(m.group(1)) if m else None))
-                        out.sort(key=lambda c: c[1], reverse=True)
-                        return out
-
-                    last_info_log_step = [0]
-                    brush_timed_out = False
-                    # Brush (GUI build) writes no stdout AND overwrites a single fixed-name export
-                    # every interval (no step in the filename). So we can't read the step directly.
-                    # Instead we COUNT export events (each new mtime on the export file = one more
-                    # `export_interval` steps done) and calibrate a real step-rate from them. The
-                    # ETA then reflects Brush's actual measured speed on this scene/hardware, which
-                    # is the only honest source — a hardcoded guess is what made the last ETA wrong.
-                    export_events = 0
-                    last_ckpt_mtime = None
-                    calib_steps = 0      # steps confirmed by the latest export event
-                    calib_time = 0.0     # elapsed time at that event
-                    while process.poll() is None:
-                        elapsed = time.time() - training_start
-
-                        ckpts = _brush_checkpoints()
-                        newest_mtime = ckpts[0][1] if ckpts else None
-                        if newest_mtime is not None and newest_mtime != last_ckpt_mtime:
-                            last_ckpt_mtime = newest_mtime
-                            export_events += 1
-                            calib_steps = export_events * export_interval
-                            calib_time = elapsed
-                            add_log(f"[Brush] Checkpoint #{export_events} written (~{calib_steps}/{training_steps} steps, {int(elapsed)}s elapsed)", "INFO")
-                        # A numbered filename, or a real stdout step, overrides the estimate (exact)
-                        fs_step_named = next((s for _p, _m, s in ckpts if s is not None), 0)
-                        exact_step = max(brush_current_step[0], fs_step_named)
-                        if exact_step > 0:
-                            calib_steps, calib_time = exact_step, elapsed
-
-                        if calib_steps > 0 and calib_time > 0:
-                            # Measured rate from real progress → smooth, self-correcting ETA.
-                            rate = calib_steps / calib_time          # steps per second
-                            est_step = min(int(rate * elapsed), training_steps - 1)
-                            pct = min(99, train_pct_start + int((99 - train_pct_start) * est_step / training_steps))
-                            eta = int((training_steps - est_step) / rate) if rate > 0 else None
-                            processing_status[job_id]['progress'] = pct
-                            processing_status[job_id]['eta_seconds'] = eta
-                            eta_str = f", ~{eta // 60}m {eta % 60}s left" if eta else ""
-                            processing_status[job_id]['step'] = f'Training Gaussian Splats (~{est_step}/{training_steps} steps{eta_str})'
-                            if est_step - last_info_log_step[0] >= 5000:
-                                last_info_log_step[0] = est_step
-                                add_log(f"[Brush] ~Step {est_step}/{training_steps} ({pct}%) — {int(elapsed)}s elapsed", "INFO")
-                        else:
-                            # Before the first export we have no rate. Hold at the band start and show
-                            # elapsed only (no fabricated ETA — that's what misled last time).
-                            processing_status[job_id]['progress'] = train_pct_start
-                            processing_status[job_id]['eta_seconds'] = None
-                            processing_status[job_id]['step'] = f'Training Gaussian Splats (warming up, {int(elapsed)}s elapsed)...'
-                            if elapsed > 30 and time.time() - last_progress_time[0] > 60:
-                                last_progress_time[0] = time.time()
-                                add_log(f"[Brush] Training — {int(elapsed)}s elapsed, awaiting first checkpoint (every {export_interval} steps); Brush renders in its own window", "INFO")
-
-                        if elapsed > timeout_seconds:
-                            process.kill()
-                            try:
-                                process.wait(timeout=30)  # reap so returncode is set, not None
-                            except subprocess.TimeoutExpired:
-                                pass  # still salvage the checkpoint below
-                            brush_timed_out = True
-                            add_log(f"Brush exceeded time budget ({timeout_seconds}s) — stopping and salvaging latest checkpoint", "WARNING")
-                            break
-                        time.sleep(5)
-
-                    stdout_thread.join(timeout=10)
-
-                    result_code = process.returncode
-                    add_log(f"Brush exited with return code: {result_code}", "INFO")
-
-                    # Pick the most-progressed real checkpoint Brush wrote. This unifies the
-                    # clean-finish and timeout-salvage paths: a periodic export from step N is a
-                    # complete, viewable splat even if training never reached total-steps. We take
-                    # the highest step (best quality), falling back to newest-by-mtime if exports
-                    # are unnumbered. Tiny/empty files (<1 KB) are skipped as failures.
-                    ckpts = _brush_checkpoints()
-                    numbered = [c for c in ckpts if c[2] is not None]
-                    ordered = sorted(numbered, key=lambda c: c[2], reverse=True) + \
-                              [c for c in ckpts if c[2] is None]
-                    found_ply, found_step = None, None
-                    for path, _mtime, step in ordered:
-                        if os.path.getsize(path) > 1024:
-                            found_ply, found_step = path, step
-                            break
-
-                    if found_ply:
-                        output_ply = os.path.join(parent_dir, 'gaussian_splat.ply')
-                        if os.path.abspath(found_ply) != os.path.abspath(output_ply):
-                            shutil.copy(found_ply, output_ply)
-
-                        # Prune near-invisible Gaussians — removes ~50% with no visible quality change
-                        try:
-                            from pipeline.gaussian_splat_utils import prune_gaussian_ply
-                            orig, kept = prune_gaussian_ply(output_ply, opacity_threshold=0.005)
-                            if orig > 0:
-                                reduction = (1 - kept / orig) * 100
-                                ply_size = os.path.getsize(output_ply) / (1024 * 1024)
-                                add_log(f"[Prune] {orig:,} → {kept:,} Gaussians ({reduction:.0f}% removed) → {ply_size:.1f} MB", "INFO")
-                        except Exception as e:
-                            add_log(f"[Prune] skipped: {e}", "WARNING")
-
-                        ply_generated = True
-                        trainer_used = 'brush'
-                        ply_size = os.path.getsize(output_ply) / (1024 * 1024)
-                        if brush_timed_out:
-                            step_note = f" at step {found_step}/{training_steps}" if found_step else ""
-                            add_log(f"Brush hit the time budget — salvaged latest checkpoint{step_note} "
-                                    f"({ply_size:.2f} MB). Usable, but lower quality than a full run.", "WARNING")
-                        else:
-                            add_log(f"Brush training complete! Output: {output_ply} ({ply_size:.2f} MB)", "INFO")
-                    else:
-                        # No usable checkpoint. Leave ply_generated False so the explicit COLMAP
-                        # sparse fallback below runs and is labelled honestly.
-                        if brush_timed_out:
-                            add_log(f"Brush timed out before writing any checkpoint (export interval "
-                                    f"{export_interval} steps not reached). Reduce training steps or raise the time budget.", "ERROR")
-                        elif result_code not in (0, None):
-                            add_log(f"Brush failed with code {result_code} and wrote no usable PLY", "ERROR")
-                        else:
-                            add_log(f"Brush exited but produced no usable splat PLY in {export_path}", "WARNING")
-
-                except Exception as e:
-                    add_log(f"Error running Brush: {e}", "ERROR")
+            brush_ply = train_with_brush(job_id, parent_dir, training_steps,
+                                         config, job_gpu, train_pct_start)
+            if brush_ply:
+                output_ply = brush_ply
+                ply_generated = True
+                trainer_used = 'brush'
 
         # Fallback: Generate basic point cloud from COLMAP if Brush failed
         if not ply_generated:
@@ -1601,10 +1630,13 @@ def mlsharp_info():
 
 @app.route('/cleanup', methods=['POST'])
 def cleanup():
-    """Clean up all old processing jobs"""
+    """Clean up all old processing jobs (running jobs are left alone)"""
     try:
-        cleanup_all_jobs()
-        return jsonify({'message': 'All processing jobs cleaned up successfully'})
+        removed, skipped = cleanup_all_jobs()
+        msg = f'Cleaned up {removed} job(s).'
+        if skipped:
+            msg += f' Skipped {len(skipped)} still running.'
+        return jsonify({'message': msg, 'removed': removed, 'skipped': skipped})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1619,37 +1651,58 @@ def cleanup_old():
 
 @app.route('/kill', methods=['POST'])
 def kill_all_processes():
-    """Kill all background processes (COLMAP, GLOMAP, Brush, etc.)"""
+    """Kill all background processes (COLMAP, GLOMAP, Brush, and detached recipes)"""
     killed = []
     process_names = ['colmap', 'glomap', 'brush', 'brush_app']
-    
+
     try:
         import psutil
-        
-        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+
+        # 1. Detached recipe jobs. These are `python recipes.py ...` processes that
+        # spawn their own COLMAP/trainer children, so kill the whole tree — matching
+        # on the name alone would either miss them or hit the Flask server itself.
+        for job_id, st in list(processing_status.items()):
+            pid = st.get('recipe_pid')
+            if not pid or st.get('status') != 'processing':
+                continue
             try:
-                proc_name = proc.info['name'].lower() if proc.info['name'] else ''
-                proc_cmdline = ' '.join(proc.info['cmdline'] or []).lower()
-                
-                # Check if it's one of our processes
-                for target in process_names:
-                    if target in proc_name or target in proc_cmdline:
-                        proc.kill()
-                        killed.append(f"{proc.info['name']} (PID: {proc.info['pid']})")
-                        break
+                parent = psutil.Process(pid)
+                for child in parent.children(recursive=True):
+                    try:
+                        child.kill()
+                        killed.append(f"{child.name()} (PID: {child.pid})")
+                    except psutil.Error:
+                        pass
+                parent.kill()
+                killed.append(f"recipe {job_id[:8]} (PID: {pid})")
+            except psutil.Error:
+                pass
+
+        # 2. Loose pipeline binaries. Match the executable name only — an unanchored
+        # cmdline substring search also matches this server's own command line
+        # (it mentions those paths), which would kill the app.
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                proc_name = (proc.info['name'] or '').lower()
+                stem = proc_name[:-4] if proc_name.endswith('.exe') else proc_name
+                if stem in process_names:
+                    proc.kill()
+                    killed.append(f"{proc.info['name']} (PID: {proc.info['pid']})")
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
             except Exception:
                 pass
-        
+
         # Clear processing status
         for job_id in list(processing_status.keys()):
             if processing_status[job_id].get('status') == 'processing':
                 processing_status[job_id]['status'] = 'cancelled'
                 processing_status[job_id]['error'] = 'Cancelled by user'
-        
+                _save_job_status(job_id)
+                release_gpu(job_id)
+
         add_log(f"Killed processes: {killed if killed else 'None running'}", "WARNING")
-        
+
         return jsonify({
             'message': f'Killed {len(killed)} processes. {", ".join(killed) if killed else "No target processes were running."}',
             'killed': killed
@@ -1660,13 +1713,18 @@ def kill_all_processes():
             for name in process_names:
                 subprocess.run(['taskkill', '/F', '/IM', f'{name}.exe'], capture_output=True)
                 subprocess.run(['taskkill', '/F', '/IM', f'{name}'], capture_output=True)
-            
-            # Clear processing status
+
+            # Clear processing status ( /T kills the detached recipe's children too)
             for job_id in list(processing_status.keys()):
                 if processing_status[job_id].get('status') == 'processing':
+                    pid = processing_status[job_id].get('recipe_pid')
+                    if pid:
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)
                     processing_status[job_id]['status'] = 'cancelled'
                     processing_status[job_id]['error'] = 'Cancelled by user'
-            
+                    _save_job_status(job_id)
+                    release_gpu(job_id)
+
             add_log("Killed processes using taskkill", "WARNING")
             return jsonify({'message': 'Killed processes using taskkill (psutil not available)'})
         except Exception as e:
@@ -1708,14 +1766,26 @@ def logs_stream():
     """Stream logs using Server-Sent Events"""
     def generate():
         last_index = 0
-        while True:
-            current_logs = get_logs()
-            if len(current_logs) > last_index:
-                for log in current_logs[last_index:]:
-                    yield f"data: {log}\n\n"
-                last_index = len(current_logs)
-            time.sleep(0.5)
-    
+        last_keepalive = time.time()
+        try:
+            while True:
+                current_logs = get_logs()
+                if len(current_logs) > last_index:
+                    for log in current_logs[last_index:]:
+                        yield f"data: {log}\n\n"
+                    last_index = len(current_logs)
+                    last_keepalive = time.time()
+                elif time.time() - last_keepalive > 15:
+                    # An idle stream never writes, so a closed browser tab is never
+                    # noticed and the worker thread lives forever. This comment frame
+                    # is ignored by EventSource but fails on a dead socket, which
+                    # raises here and ends the generator.
+                    yield ": keepalive\n\n"
+                    last_keepalive = time.time()
+                time.sleep(0.5)
+        except GeneratorExit:
+            return
+
     return Response(generate(), mimetype='text/event-stream')
 
 @app.route('/logs/current')
@@ -1897,8 +1967,7 @@ def upload_files():
 
     # Quality scale multiplier: draft=0.3x, standard=1x, cinematic=2x
     quality_scale_name = request.form.get('quality_scale', 'standard')
-    quality_scale_map = {'draft': 0.3, 'standard': 1.0, 'cinematic': 2.0}
-    quality_scale = quality_scale_map.get(quality_scale_name, 1.0)
+    quality_scale = QUALITY_SCALES.get(quality_scale_name, 1.0)
 
 
     mvs_mode = request.form.get('mvs_quality_mode', 'balanced').lower()
@@ -1914,9 +1983,12 @@ def upload_files():
     # actually chose one. max_image_size and quality_mode have no UI control in
     # the current GUI, so they must stay None — otherwise every preset above
     # 'medium' gets silently downgraded to 3200px / quality_mode off.
+    _dense = request.form.get('enable_dense')
     advanced_settings = {
         'training_steps': None,
-        'enable_dense': request.form.get('enable_dense', 'false').lower() == 'true',
+        # None when the form omits it, so the preset's own `dense` wins — sending
+        # False here would force MVS off even for a preset that wants it.
+        'enable_dense': (_dense.lower() == 'true') if _dense is not None else None,
         'max_image_size': int(request.form['max_image_size']) if request.form.get('max_image_size') else None,
         'quality_mode': True if quality_mode_enabled else None,
         'mvs_quality_mode': mvs_mode,
@@ -1965,6 +2037,9 @@ def upload_files():
 @app.route('/status/<job_id>')
 def get_status(job_id):
     """Get processing status (checks memory first, then disk for recovery)"""
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
     if job_id not in processing_status:
         saved = _load_job_status(job_id)
         if saved:
@@ -1978,7 +2053,7 @@ def get_status(job_id):
     # separate process, so processing_status isn't updated in-memory). Overlay it.
     if processing_status[job_id].get('is_recipe'):
         try:
-            _rs_path = os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'recipe_status.json')
+            _rs_path = os.path.join(job_folder, 'recipe_status.json')
             if os.path.exists(_rs_path):
                 with open(_rs_path) as _f:
                     _rs = json.load(_f)
@@ -1995,19 +2070,30 @@ def get_status(job_id):
                     transition_stage(processing_status, job_id, _rstage)
                 # the sparse point-cloud preview becomes available once alignment.json is written
                 if not processing_status[job_id].get('preview_ready') and os.path.exists(
-                        os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'alignment.json')):
+                        os.path.join(job_folder, 'alignment.json')):
                     processing_status[job_id]['preview_ready'] = True
                 # surface the detached recipe's own log in the app /logs stream (it runs in a
                 # separate process, so add_log() never saw it). Ingest new lines incrementally.
-                _rlog = os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'recipe.log')
+                # Track a BYTE offset and seek to it: /status is polled every second
+                # for hours, and re-reading the whole (growing) log each time made
+                # this O(n^2) on a log that reaches tens of MB.
+                _rlog = os.path.join(job_folder, 'recipe.log')
                 if os.path.exists(_rlog):
                     _off = processing_status[job_id].get('_recipe_log_off', 0)
-                    with open(_rlog, errors='ignore') as _lf:
-                        _lines = _lf.read().splitlines()
-                    for _ln in _lines[_off:]:
+                    if os.path.getsize(_rlog) < _off:
+                        _off = 0  # log was truncated/restarted
+                    # Binary mode so the offset is a plain byte count (text-mode
+                    # tell() returns an opaque cookie that can't be compared to a size).
+                    with open(_rlog, 'rb') as _lf:
+                        _lf.seek(_off)
+                        _raw = _lf.read()
+                        processing_status[job_id]['_recipe_log_off'] = _off + len(_raw)
+                    _new = _raw.decode('utf-8', errors='ignore')
+                    # A trailing partial line is fine to emit — the writer flushes
+                    # whole lines, so this only splits on a genuine mid-write read.
+                    for _ln in _new.splitlines():
                         if _ln.strip():
                             add_log(_ln.strip(), "INFO")
-                    processing_status[job_id]['_recipe_log_off'] = len(_lines)
                 # when the recipe completes, freeze all stage timers
                 if _rs.get('status') == 'completed':
                     for _st in processing_status[job_id].get('stages', {}).values():
@@ -2045,6 +2131,9 @@ def _pick_result_ply(folder):
 @app.route('/ply/<job_id>')
 def serve_ply(job_id):
     """Serve PLY file for viewer"""
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
     # First try from processing_status (current session)
     if job_id in processing_status:
         job_data = processing_status[job_id]
@@ -2065,7 +2154,6 @@ def serve_ply(job_id):
                 return send_file(os.path.abspath(found), mimetype='application/octet-stream')
 
     # Fallback: check filesystem directly for jobs from previous sessions
-    job_folder = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
     if os.path.exists(job_folder):
         found = _pick_result_ply(job_folder)
         if found:
@@ -2088,10 +2176,13 @@ def serve_ply(job_id):
 @app.route('/align/<job_id>')
 def serve_alignment(job_id):
     """Serve the 3D alignment view data (sparse points + camera frustums) as JSON."""
-    # Absolute path: os.path.exists resolves against cwd, but Flask's send_file
-    # resolves a relative path against app.root_path — they disagree when the
-    # server is launched from a different working directory. abspath unifies them.
-    align = os.path.abspath(os.path.join(app.config['PROCESSING_FOLDER'], job_id, 'alignment.json'))
+    # _job_folder returns an absolute path: os.path.exists resolves against cwd,
+    # but Flask's send_file resolves a relative path against app.root_path — they
+    # disagree when the server is launched from a different working directory.
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
+    align = os.path.join(job_folder, 'alignment.json')
     if os.path.exists(align):
         return send_file(align, mimetype='application/json')
     return jsonify({'error': 'alignment not ready'}), 404
@@ -2099,10 +2190,14 @@ def serve_alignment(job_id):
 @app.route('/download/<job_id>/<file_type>')
 def download_file(job_id, file_type):
     """Download processed files"""
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
+
     # Get output_path from processing_status or filesystem
     output_path = None
     sparse_path = None
-    
+
     if job_id in processing_status:
         job_data = processing_status[job_id]
         if job_data['status'] != 'completed':
@@ -2111,7 +2206,6 @@ def download_file(job_id, file_type):
         sparse_path = job_data.get('sparse_path')
     else:
         # Fallback to filesystem for jobs from previous sessions
-        job_folder = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
         if os.path.exists(job_folder):
             output_path = job_folder
             sparse_path = os.path.join(job_folder, 'sparse', '0')
@@ -2175,14 +2269,17 @@ def download_tracking_file(job_id, filename):
         return jsonify({'error': 'Invalid filename'}), 400
     
     # Resolve path
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
     if job_id in processing_status:
         output_path = processing_status[job_id].get('output_path')
     else:
-        output_path = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
-    
+        output_path = job_folder
+
     if not output_path:
         return jsonify({'error': 'Job not found'}), 404
-    
+
     tracking_dir = os.path.join(output_path, 'camera_tracking')
     file_path = os.path.join(tracking_dir, safe_name)
     
@@ -2209,10 +2306,14 @@ def camera_tracking():
     if not job_id:
         return jsonify({'error': 'Missing job_id parameter'}), 400
 
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
+
     if job_id in processing_status:
         output_path = processing_status[job_id].get('output_path')
     else:
-        output_path = os.path.join(app.config['PROCESSING_FOLDER'], job_id)
+        output_path = job_folder
 
     if not output_path or not os.path.exists(output_path):
         return jsonify({'error': 'Job not found'}), 404
@@ -2280,30 +2381,10 @@ def request_too_large(error):
 
 if __name__ == '__main__':
     # Add MSVC cl.exe to PATH at startup so gsplat JIT compilation works for all subprocesses.
-    # Searches all VS versions (2019/2022) and editions (Community/BuildTools/Professional/Enterprise).
-    _startup_cl_found = False
-    for _vs_root in [r"C:\Program Files\Microsoft Visual Studio",
-                     r"C:\Program Files (x86)\Microsoft Visual Studio"]:
-        if _startup_cl_found or not os.path.exists(_vs_root):
-            continue
-        for _year in sorted(os.listdir(_vs_root), reverse=True):
-            for _edition in ["BuildTools", "Enterprise", "Professional", "Community"]:
-                _msvc_bin = os.path.join(_vs_root, _year, _edition, "VC", "Tools", "MSVC")
-                if not os.path.exists(_msvc_bin):
-                    continue
-                for _v in sorted(os.listdir(_msvc_bin), reverse=True):
-                    _cl_dir = os.path.join(_msvc_bin, _v, "bin", "Hostx64", "x64")
-                    if os.path.exists(os.path.join(_cl_dir, "cl.exe")):
-                        if _cl_dir not in os.environ.get("PATH", ""):
-                            os.environ["PATH"] = _cl_dir + ";" + os.environ.get("PATH", "")
-                        print(f"[startup] MSVC cl.exe added to PATH: {_cl_dir}")
-                        _startup_cl_found = True
-                        break
-                if _startup_cl_found:
-                    break
-            if _startup_cl_found:
-                break
-    if not _startup_cl_found:
+    _startup_cl_dir = add_msvc_to_path()
+    if _startup_cl_dir:
+        print(f"[startup] MSVC cl.exe added to PATH: {_startup_cl_dir}")
+    else:
         print("[startup] WARNING: MSVC cl.exe not found — gsplat JIT will fail. Install VS Build Tools.")
 
     # Check ML-Sharp availability on startup
@@ -2316,8 +2397,7 @@ if __name__ == '__main__':
     if BATCH_AVAILABLE:
         def _batch_process_fn(job_id, image_path, preset, settings):
             """Direct call to process_images_async — no self-HTTP roundtrip."""
-            quality_scale_map = {'draft': 0.3, 'standard': 1.0, 'cinematic': 2.0}
-            quality_scale = quality_scale_map.get(settings.get('quality_scale', 'standard'), 1.0)
+            quality_scale = QUALITY_SCALES.get(settings.get('quality_scale', 'standard'), 1.0)
             # Use None as the "unset" sentinel so the preset's own defaults win
             # (config.update skips None). Defaulting to True/3200 here would
             # silently force dense MVS on and downgrade high/quality/expert to
@@ -2355,5 +2435,14 @@ if __name__ == '__main__':
     if mlsharp_available:
         add_log(f"ML-Sharp version: {mlsharp_version}", "INFO")
 
-    app.run(debug=True, host='0.0.0.0', port=5000, use_debugger=False, use_reloader=False)
+    # Loopback by default. This is a debug-mode Flask dev server with no auth that
+    # exposes /kill, /cleanup and arbitrary job downloads — binding 0.0.0.0 hands
+    # all of that to anyone on the network. Set SPLAT_HOST=0.0.0.0 to opt in.
+    _host = os.environ.get('SPLAT_HOST', '127.0.0.1')
+    if _host != '127.0.0.1':
+        add_log(f"Listening on {_host} — the server has no authentication, "
+                f"only do this on a trusted network", "WARNING")
+    # use_reloader must stay False: with it on, ML-Sharp detection runs in the
+    # parent while requests are served by a child where mlsharp_available is False.
+    app.run(debug=True, host=_host, port=5000, use_debugger=False, use_reloader=False)
 

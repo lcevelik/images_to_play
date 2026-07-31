@@ -1,6 +1,6 @@
 {
   "features": 0,
-  "peak": 0.00005,
+  "peak": 5e-05,
   "tracks": 20000000,
   "octaves": 8,
   "tri_angle": 0.005,
@@ -11,5 +11,11 @@
   "tri_merge_error": 64.0,
   "dense": false,
   "force_quality": true,
-  "description": "Maximum practical quality - aggressive COLMAP, sparse only, ~20-40 min"
+  "description": "Maximum practical quality - aggressive COLMAP, sparse only, ~20-40 min",
+  "app": {
+    "detail_level": "quality",
+    "training_steps": 60000,
+    "max_image_size": 4800,
+    "quality_mode": true
+  }
 }

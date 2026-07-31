@@ -43,7 +43,9 @@ test_mcmc_smoke.py      <- Standalone GPU smoke test for gsplat_mcmc_trainer (no
 When `START_SERVER.bat` runs `python app.py`:
 1. Checks if ML-Sharp (`sharp`) is available in PATH
 2. Starts a background cleanup thread (deletes old job folders every 24 hours)
-3. Starts Flask on `0.0.0.0:5000` (accessible from any network interface)
+3. Starts Flask on `127.0.0.1:5000` (loopback only). Set `SPLAT_HOST=0.0.0.0` to
+   expose it on the LAN — the server has no authentication, so only do that on a
+   trusted network.
 
 ### Job Lifecycle
 
@@ -289,17 +291,18 @@ python dense_reconstruction.py \
 
 ### Functions
 
-#### `generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=True)`
+#### `generate_ply_from_colmap(colmap_path, output_ply_path, center_at_origin=False)`
 
-Reads the COLMAP sparse reconstruction using `pycolmap`, extracts all 3D points and their colors, optionally centers the point cloud at the origin, and writes a PLY file.
+Reads the COLMAP sparse reconstruction, extracts all 3D points and their colors, optionally centers the point cloud at the origin, and writes a PLY file.
 
 - Returns `True` on success, `False` on failure
-- Requires `pycolmap` and `numpy` (both bundled)
-- Output is ASCII PLY format with `x y z r g b` per vertex
+- Requires only `numpy` — `points3D.bin` is parsed by `sparse_preview._read_points3D_bin`, so this works in the Lite bundle (no pycolmap). pycolmap is only used for `.txt` reconstructions.
+- `center_at_origin` defaults to `False`: the camera poses and trained splat stay in the COLMAP frame, so recentering only this cloud puts it out of register with them
+- Output is binary little-endian PLY with `x y z r g b` per vertex
 
 #### `write_ply_file(output_path, points, colors=None)`
 
-Low-level PLY writer. Writes an ASCII PLY file from a list of `[x, y, z]` points and optional `[r, g, b]` colors (0–255). Called internally by `generate_ply_from_colmap`.
+Low-level PLY writer. Writes a binary little-endian PLY file from `[x, y, z]` points and optional `[r, g, b]` colors (0–255). Called internally by `generate_ply_from_colmap`.
 
 #### Other Functions (not used in the current pipeline)
 
@@ -444,7 +447,7 @@ Thread: process_images_async()
   [4] FALLBACK — only if step 3 fails or Brush not found:
       Calls gaussian_splat_utils.generate_ply_from_colmap()
       │
-      └─ Reads sparse/0/ via pycolmap → point_cloud.ply
+      └─ Reads sparse/0/ (pure-struct .bin reader) → point_cloud.ply
 
 ─────────────────────────────────────────────────────────────────────
 Result:
