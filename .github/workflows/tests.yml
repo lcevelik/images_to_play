@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cpu-regression:
+    # CPU-only: no CUDA, no COLMAP, no Brush, no running server. Everything the
+    # GPU/binary paths need is out of scope here — see tests/test_mcmc_smoke.py
+    # (CUDA) and tests/test_all_presets.py (live server) for those.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.14']   # 3.11 = bundled Lite runtime, 3.14 = dev box
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install CPU-only dependencies
+        run: python -m pip install --upgrade pip numpy pytest
+
+      - name: Run CPU regression tests
+        working-directory: simple_splat/App
+        run: python -m pytest tests/test_cpu_regression.py -q
+
+      - name: Byte-compile the pipeline package
+        working-directory: simple_splat/App
+        run: python -m compileall -q pipeline app.py batch_processing.py
