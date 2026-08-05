@@ -71,7 +71,8 @@ def reset_output_dir(output_dir):
 def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
                     min_matches=15, progress=print, extractor='superpoint',
                     keep_two_view_tracks=False, mapper_min_angle=1.5,
-                    mapper_max_reproj=4.0, mapper_min_matches=15):
+                    mapper_max_reproj=4.0, mapper_min_matches=15,
+                    pair_window=8):
     import torch
     from lightglue import LightGlue
     from lightglue.utils import load_image, rbd
@@ -145,7 +146,6 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     # --- temporal-window LightGlue matching + per-pair geometric verification ---
     opts = pycolmap.TwoViewGeometryOptions()
     nverified = 0
-    pair_window = 8
     for a, b in iter_candidate_pairs(len(imgs), pair_window=pair_window):
         with torch.no_grad():
             m = matcher({'image0': feats[a], 'image1': feats[b]})
@@ -200,10 +200,11 @@ if __name__ == "__main__":
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     p.add_argument("--max-kpts", type=int, default=2048)
     p.add_argument("--extractor", default="superpoint", choices=["superpoint", "aliked", "disk"])
+    p.add_argument("--pair-window", type=int, default=8)
     a = p.parse_args()
     import time
     t0 = time.time()
     r = run_learned_sfm(a.images, a.output, device=a.device, max_kpts=a.max_kpts,
-                        extractor=a.extractor,
+                        extractor=a.extractor, pair_window=a.pair_window,
                         progress=lambda m: print(f"[{int(time.time()-t0)}s] {m}", flush=True))
     print("RESULT:", r)
