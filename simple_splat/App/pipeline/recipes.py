@@ -110,7 +110,7 @@ def _learned_sfm(images_dir, job_dir, log, status_cb=None):
             _seen['s'] = 'mp'; status_cb("3D mapping...", 12, "mapping")
 
     _run([PY, os.path.join(APP_DIR, "pipeline", "learned_sfm.py"),
-          "--images", images_dir, "--output", seed, "--device", "cuda", "--max-kpts", "4096", "--pair-window", "32"], _slog, timeout=7200)
+          "--images", images_dir, "--output", seed, "--device", "cuda", "--max-kpts", "2048", "--pair-window", "16"], _slog, timeout=7200)
     return os.path.join(seed, "sparse", "0")
 
 
