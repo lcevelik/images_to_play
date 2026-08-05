@@ -197,11 +197,18 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     # min triangulation angle and higher reproj tolerance. Splat training prunes
     # any resulting noise, so trading a little precision for density is the right call.
     opt = pycolmap.IncrementalPipelineOptions()
-    opt.min_num_matches = mapper_min_matches
+    opt.min_num_matches = max(8, mapper_min_matches)
+    opt.init_image_id1 = 1
+    opt.init_image_id2 = min(2, len(imgs))
+    opt.init_num_trials = 100
+    opt.init_max_error = 8.0
+    opt.init_min_num_inliers = 20
     opt.triangulation.ignore_two_view_tracks = (not keep_two_view_tracks)
-    opt.triangulation.min_angle = mapper_min_angle
-    opt.triangulation.complete_max_reproj_error = mapper_max_reproj
-    opt.triangulation.merge_max_reproj_error = mapper_max_reproj
+    opt.triangulation.min_angle = max(0.1, mapper_min_angle)
+    opt.triangulation.complete_max_reproj_error = max(8.0, mapper_max_reproj)
+    opt.triangulation.merge_max_reproj_error = max(8.0, mapper_max_reproj)
+    opt.ba_global.max_num_iterations = 50
+    opt.ba_local.max_num_iterations = 25
     progress(f"[learned-sfm] mapper: keep_2view={keep_two_view_tracks}, min_angle={mapper_min_angle}, "
              f"max_reproj={mapper_max_reproj}, min_matches={mapper_min_matches}")
     recs = pycolmap.incremental_mapping(db_path, image_dir, output_dir, options=opt)
