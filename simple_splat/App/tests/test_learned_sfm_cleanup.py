@@ -28,3 +28,4 @@ def test_iter_candidate_pairs_uses_a_window_for_large_sets():
     assert (0, 1) in pairs
     assert any(b - a > 2 for a, b in pairs)
     assert all(b - a <= 8 for a, b in pairs)
+    assert len(pairs) == len(set(pairs))

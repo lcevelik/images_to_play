@@ -33,13 +33,17 @@ def iter_candidate_pairs(num_images, pair_window=8):
         return []
     max_window = max(1, int(pair_window))
     pairs = []
+    seen = set()
     for a in range(num_images):
         for b in range(a + 1, min(num_images, a + max_window + 1)):
-            pairs.append((a, b))
+            if (a, b) not in seen:
+                pairs.append((a, b))
+                seen.add((a, b))
         for stride in (max_window, max_window * 2, max_window * 4):
             b = a + stride
-            if b < num_images:
+            if b < num_images and (a, b) not in seen:
                 pairs.append((a, b))
+                seen.add((a, b))
     return pairs
 
 
