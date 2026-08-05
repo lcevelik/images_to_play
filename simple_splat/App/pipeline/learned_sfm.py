@@ -25,9 +25,9 @@ def iter_candidate_pairs(num_images, pair_window=8):
     """Yield candidate image pairs in a bounded temporal window.
 
     Exhaustive matching over hundreds of images is extremely slow for this
-    workflow and often times out before the mapper can start. A small window
-    preserves local temporal consistency for video/frame inputs while keeping
-    the run tractable.
+    workflow and often times out before the mapper can start. We keep a small
+    local window for temporal consistency and add a few wider-baseline anchor
+    pairs so the mapper still has a chance to initialize on long sequences.
     """
     if num_images <= 1:
         return []
@@ -36,6 +36,10 @@ def iter_candidate_pairs(num_images, pair_window=8):
     for a in range(num_images):
         for b in range(a + 1, min(num_images, a + max_window + 1)):
             pairs.append((a, b))
+        for stride in (max_window, max_window * 2, max_window * 4):
+            b = a + stride
+            if b < num_images:
+                pairs.append((a, b))
     return pairs
 
 
