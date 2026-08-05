@@ -49,6 +49,12 @@ def depth_seed(parent_dir, out_ply, stride=8, model='small', merge_sparse=True,
 
     sparse_dir = os.path.join(parent_dir, 'sparse', '0')
     images_dir = os.path.join(parent_dir, 'images')
+    if not os.path.isdir(images_dir):
+        root_images = [f for f in os.listdir(parent_dir) if os.path.isfile(os.path.join(parent_dir, f)) and os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}]
+        if root_images:
+            images_dir = parent_dir
+        else:
+            raise FileNotFoundError(f"No undistorted images found in {parent_dir} or {images_dir}")
     recon = pycolmap.Reconstruction(sparse_dir)
     progress(f"[depth-seed] {len(recon.images)} images, {len(recon.points3D)} sparse points")
 
@@ -129,9 +135,17 @@ def depth_seed(parent_dir, out_ply, stride=8, model='small', merge_sparse=True,
             progress(f"[depth-seed]   {ii+1} views, {sum(len(a) for a in acc_xyz):,} raw pts")
 
     if not acc_xyz:
-        # np.concatenate([]) raises a bare ValueError — name the actual problem
-        raise RuntimeError("depth-seed produced no points: no view had enough "
-                           "sparse anchors (>=20) to align its depth map")
+        progress("[depth-seed] no view produced enough anchors for dense depth alignment; using sparse seed only")
+        if merge_sparse:
+            sp_rgb = np.array([p.color for p in recon.points3D.values()], dtype=np.uint8)
+            xyz = all_sp.astype(np.float64)
+            rgb = sp_rgb.astype(np.uint8)
+        else:
+            xyz = np.empty((0, 3), dtype=np.float64)
+            rgb = np.empty((0, 3), dtype=np.uint8)
+        _write_points_ply(out_ply, xyz, rgb)
+        progress(f"[depth-seed] -> {out_ply}")
+        return out_ply
     xyz = np.concatenate(acc_xyz).astype(np.float64)
     rgb = np.concatenate(acc_rgb).astype(np.uint8)
     progress(f"[depth-seed] {len(xyz):,} raw depth points")
@@ -222,6 +236,10 @@ def build_dense_seed_dir(parent_dir, out_dir, gap_mult=12.0, stride=8, model='sm
 
     # images: point Brush/trainer at the undistorted images
     src_imgs = os.path.join(parent_dir, 'images')
+    if not os.path.isdir(src_imgs):
+        root_images = [f for f in os.listdir(parent_dir) if os.path.isfile(os.path.join(parent_dir, f)) and os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}]
+        if root_images:
+            src_imgs = parent_dir
     dst_imgs = os.path.join(out_dir, 'images')
     if os.path.isdir(src_imgs) and not os.path.isdir(dst_imgs):
         shutil.copytree(src_imgs, dst_imgs)

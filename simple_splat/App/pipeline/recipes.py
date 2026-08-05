@@ -31,6 +31,24 @@ BRUSH = find_brush_binary()
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
 
+def _resolve_brush_path():
+    """Return a usable Brush executable path, refreshing it on every call."""
+    global BRUSH
+    if BRUSH and os.path.exists(BRUSH):
+        return BRUSH
+
+    resolved = find_brush_binary()
+    if resolved and os.path.exists(resolved):
+        BRUSH = resolved
+        return BRUSH
+
+    # Last-resort fallback: accept a PATH-resolved executable even if the
+    # cached value was stale or missing at import time.
+    if BRUSH and os.path.isabs(BRUSH):
+        return BRUSH
+    return None
+
+
 def _hidden_si():
     """STARTUPINFO that hides a child's window (used for the Brush GUI binary)."""
     if os.name != 'nt':
@@ -138,16 +156,19 @@ def _undistort(images_dir, sparse_dir, job_dir, log):
 
 def _brush(seed_dir, out_dir, steps, res, growth_stop, log, timeout=14400):
     """Launch Brush, wait for export_{steps}.ply (GUI binary: no stdout, poll files)."""
-    if not BRUSH:
+    brush_path = _resolve_brush_path()
+    if not brush_path:
         raise RuntimeError("Brush not found")
     os.makedirs(out_dir, exist_ok=True)
-    final = os.path.join(out_dir, f"export_{steps}.ply")
-    cmd = [BRUSH, seed_dir, "--total-steps", str(steps), "--max-resolution", str(res),
+    seed_dir_str = os.fspath(seed_dir)
+    out_dir_str = os.fspath(out_dir)
+    final = os.path.join(out_dir_str, f"export_{steps}.ply")
+    cmd = [str(brush_path), seed_dir_str, "--total-steps", str(steps), "--max-resolution", str(res),
            "--sh-degree", "3", "--growth-grad-threshold", "0.00002", "--growth-select-fraction", "0.15",
            "--refine-every", "100", "--growth-stop-iter", str(growth_stop),
-           "--export-path", out_dir, "--export-name", "export_{iter}.ply",
+           "--export-path", out_dir_str, "--export-name", "export_{iter}.ply",
            "--export-every", str(max(2000, steps // 4))]
-    log(f"$ {' '.join(cmd)}", "DEBUG")
+    log(f"$ {' '.join(str(c) for c in cmd)}", "DEBUG")
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=_NO_WINDOW, startupinfo=_hidden_si())
     start = time.time()

@@ -16,7 +16,38 @@ device='cuda' when the GPU is free for a big speed-up.
 """
 import os
 import glob
+import shutil
+import uuid
 import numpy as np
+
+
+def reset_output_dir(output_dir):
+    """Remove stale SfM artifacts so a re-run starts from a clean database."""
+    if not output_dir:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    for name in ('database.db', 'database.db-journal', 'database.db-wal', 'database.db-shm', 'images.bin', 'cameras.bin', 'points3D.bin'):
+        path = os.path.join(output_dir, name)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except PermissionError:
+                try:
+                    os.replace(path, path + '.stale')
+                except Exception:
+                    pass
+    for path in glob.glob(os.path.join(output_dir, 'database*.db*')):
+        try:
+            os.remove(path)
+        except PermissionError:
+            try:
+                os.replace(path, path + '.stale')
+            except Exception:
+                pass
+    sparse_dir = os.path.join(output_dir, 'sparse')
+    if os.path.isdir(sparse_dir):
+        shutil.rmtree(sparse_dir, ignore_errors=True)
+    os.makedirs(sparse_dir, exist_ok=True)
 
 
 def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
@@ -29,6 +60,7 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     import pycolmap
 
     os.makedirs(output_dir, exist_ok=True)  # Database.open() needs the dir to exist
+    reset_output_dir(output_dir)
     dev = torch.device('cuda' if (device == 'cuda' and torch.cuda.is_available()) else 'cpu')
     feat = str(extractor).lower()
     if feat == 'aliked':
@@ -66,9 +98,7 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     # portrait/landscape (or mixed-resolution) set would then get wrong
     # intrinsics for every image that differs from the first one. Share a
     # camera only among images with the same (W, H).
-    db_path = os.path.join(output_dir, 'database.db')
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    db_path = os.path.join(output_dir, f'database_{uuid.uuid4().hex[:8]}.db')
     db = pycolmap.Database.open(db_path)
 
     def _make_camera(size):
@@ -88,10 +118,11 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
 
     image_ids = []
     for i, name in enumerate(names):
-        im = pycolmap.Image(name=name, camera_id=cam_ids[sizes[i]], image_id=i + 1)
+        image_id = i + 1
+        im = pycolmap.Image(name=name, camera_id=cam_ids[sizes[i]], image_id=image_id)
         db.write_image(im, True)
-        db.write_keypoints(i + 1, kpts[i].astype(np.float32))
-        image_ids.append(i + 1)
+        db.write_keypoints(image_id, kpts[i].astype(np.float32))
+        image_ids.append(image_id)
 
     # --- exhaustive LightGlue matching + per-pair geometric verification ---
     opts = pycolmap.TwoViewGeometryOptions()

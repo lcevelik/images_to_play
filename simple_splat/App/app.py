@@ -492,6 +492,48 @@ def is_video_file(filename):
     video_extensions = {'mp4', 'mov', 'avi', 'mkv', 'webm'}
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in video_extensions
 
+def ensure_input_images(job_folder, images_folder, frame_interval=10, max_frames=1000, log_fn=None):
+    """Ensure the images folder contains files for processing.
+
+    For video uploads the app extracts frames into the job's images folder. The
+    detached recipe runner later receives that folder as its input path, so the
+    images folder must already exist with actual image files before processing
+    starts. If a folder is empty but contains a video file next to it, extract
+    frames from that video automatically.
+    """
+    if log_fn is None:
+        log_fn = add_log
+
+    os.makedirs(images_folder, exist_ok=True)
+    image_files = [f for f in os.listdir(images_folder) if f.lower().endswith(IMAGE_EXTENSIONS)]
+    if image_files:
+        return True
+
+    job_folder = os.path.abspath(job_folder)
+    candidates = []
+    for entry in os.listdir(job_folder):
+        if not os.path.isfile(os.path.join(job_folder, entry)):
+            continue
+        if is_video_file(entry):
+            candidates.append(entry)
+    if not candidates:
+        return False
+
+    video_name = sorted(candidates)[0]
+    video_path = os.path.join(job_folder, video_name)
+    frame_count = extract_frames_from_video(
+        video_path,
+        images_folder,
+        frame_interval=frame_interval,
+        max_frames=max_frames,
+        job_dir=job_folder,
+    )
+    if frame_count > 0:
+        log_fn(f"Prepared {frame_count} frames for processing from {video_name}", "INFO")
+        return True
+    return False
+
+
 def extract_frames_from_video(video_path, output_folder, frame_interval=10, max_frames=1000, job_dir=None):
     """
     Extract frames from video file.
@@ -961,6 +1003,12 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
             add_log(f"[QUALITY] QUALITY MODE ENABLED - Maximum quality settings (slower processing)", "INFO")
         
         # Count images
+        if not os.path.isdir(image_path):
+            raise FileNotFoundError(f"Input path missing: {image_path}")
+
+        if not ensure_input_images(os.path.dirname(image_path), image_path, frame_interval=1, max_frames=1000):
+            add_log(f"No input images were available in {image_path}; attempting to prepare from nearby video files", "WARNING")
+
         image_files = [f for f in os.listdir(image_path) if f.lower().endswith(IMAGE_EXTENSIONS)]
         add_log(f"Found {len(image_files)} images to process", "INFO")
 
@@ -1902,12 +1950,10 @@ def upload_files():
         max_frames = int(request.form.get('max_frames', 1000))
         
         # Extract frames
-        frame_count = extract_frames_from_video(video_path, images_folder, frame_interval=frame_interval, max_frames=max_frames, job_dir=job_folder)
-        
-        if frame_count == 0:
+        if not ensure_input_images(job_folder, images_folder, frame_interval=frame_interval, max_frames=max_frames):
             return jsonify({'error': 'Could not extract frames from video'}), 400
         
-        add_log(f"Extracted {frame_count} frames from video", "INFO")
+        add_log(f"Prepared frames for video upload", "INFO")
         
         # Mark that interval was already applied during extraction
         # So COLMAP should NOT apply interval again
@@ -2444,5 +2490,6 @@ if __name__ == '__main__':
                 f"only do this on a trusted network", "WARNING")
     # use_reloader must stay False: with it on, ML-Sharp detection runs in the
     # parent while requests are served by a child where mlsharp_available is False.
-    app.run(debug=True, host=_host, port=5000, use_debugger=False, use_reloader=False)
+    # Run in simple mode to avoid debugger/reloader issues in this environment.
+    app.run(host=_host, port=5000, debug=False, use_debugger=False, use_reloader=False)
 

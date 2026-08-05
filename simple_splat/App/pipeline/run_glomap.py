@@ -21,8 +21,19 @@ def find_brush_binary():
     App/Brush/ instead of simple_splat/Brush/, so it only ever found C:\\Brush)."""
     app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     bundled = os.path.join(os.path.dirname(app_dir), 'Brush', 'brush_app.exe')
-    for path in (bundled, r"C:\Brush\brush_app.exe", r"C:\Brush\brush.exe",
-                 "brush_app", "brush"):
+    candidate_paths = [
+        bundled,
+        r"C:\Brush\brush_app.exe",
+        r"C:\Brush\brush.exe",
+        os.path.expanduser(r"~\Downloads\brush-app-x86_64-pc-windows-msvc\brush_app.exe"),
+        os.path.expanduser(r"~\Downloads\brush_app.exe"),
+        os.path.expanduser(r"~\Downloads\brush.exe"),
+        os.path.expanduser(r"~\Desktop\brush_app.exe"),
+        os.environ.get("BRUSH_BINARY_PATH"),
+    ]
+    for path in candidate_paths:
+        if not path:
+            continue
         if os.path.isabs(path):
             if os.path.exists(path):
                 return path
@@ -30,6 +41,20 @@ def find_brush_binary():
             found = which(path)
             if found:
                 return found
+
+    for base in (os.path.expanduser(r"~\Downloads"), r"C:\Downloads", r"C:\Users\LuxMC\Downloads"):
+        if not base or not os.path.isdir(base):
+            continue
+        for root, _, files in os.walk(base):
+            for filename in ("brush_app.exe", "brush.exe"):
+                if filename in files:
+                    return os.path.join(root, filename)
+
+    for name in ("brush_app", "brush"):
+        found = which(name)
+        if found:
+            return found
+
     return None
 
 # ---- FIX #2: Cache COLMAP path (probe once at startup, not per-job) ----
