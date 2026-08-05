@@ -21,6 +21,24 @@ import uuid
 import numpy as np
 
 
+def iter_candidate_pairs(num_images, pair_window=8):
+    """Yield candidate image pairs in a bounded temporal window.
+
+    Exhaustive matching over hundreds of images is extremely slow for this
+    workflow and often times out before the mapper can start. A small window
+    preserves local temporal consistency for video/frame inputs while keeping
+    the run tractable.
+    """
+    if num_images <= 1:
+        return []
+    max_window = max(1, int(pair_window))
+    pairs = []
+    for a in range(num_images):
+        for b in range(a + 1, min(num_images, a + max_window + 1)):
+            pairs.append((a, b))
+    return pairs
+
+
 def reset_output_dir(output_dir):
     """Remove stale SfM artifacts so a re-run starts from a clean database."""
     if not output_dir:
@@ -124,25 +142,26 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
         db.write_keypoints(image_id, kpts[i].astype(np.float32))
         image_ids.append(image_id)
 
-    # --- exhaustive LightGlue matching + per-pair geometric verification ---
+    # --- temporal-window LightGlue matching + per-pair geometric verification ---
     opts = pycolmap.TwoViewGeometryOptions()
     nverified = 0
-    for a in range(len(imgs)):
-        for b in range(a + 1, len(imgs)):
-            with torch.no_grad():
-                m = matcher({'image0': feats[a], 'image1': feats[b]})
-            matches = rbd(m)['matches'].cpu().numpy()    # [M,2] indices
-            if len(matches) < min_matches:
-                continue
-            mu = matches.astype(np.uint32)
-            db.write_matches(image_ids[a], image_ids[b], mu)
-            tvg = pycolmap.estimate_two_view_geometry(
-                cams_by_size[sizes[a]], kpts[a].astype(np.float64),
-                cams_by_size[sizes[b]], kpts[b].astype(np.float64), mu, opts)
-            if tvg is not None and np.asarray(tvg.inlier_matches).shape[0] >= min_matches:
-                db.write_two_view_geometry(image_ids[a], image_ids[b], tvg)
-                nverified += 1
-        progress(f"[learned-sfm] matched through image {a+1}/{len(imgs)} (verified pairs: {nverified})")
+    pair_window = 8
+    for a, b in iter_candidate_pairs(len(imgs), pair_window=pair_window):
+        with torch.no_grad():
+            m = matcher({'image0': feats[a], 'image1': feats[b]})
+        matches = rbd(m)['matches'].cpu().numpy()    # [M,2] indices
+        if len(matches) < min_matches:
+            continue
+        mu = matches.astype(np.uint32)
+        db.write_matches(image_ids[a], image_ids[b], mu)
+        tvg = pycolmap.estimate_two_view_geometry(
+            cams_by_size[sizes[a]], kpts[a].astype(np.float64),
+            cams_by_size[sizes[b]], kpts[b].astype(np.float64), mu, opts)
+        if tvg is not None and np.asarray(tvg.inlier_matches).shape[0] >= min_matches:
+            db.write_two_view_geometry(image_ids[a], image_ids[b], tvg)
+            nverified += 1
+        if b % 10 == 0 or b == len(imgs) - 1:
+            progress(f"[learned-sfm] matched through image {b+1}/{len(imgs)} (verified pairs: {nverified})")
     db.close()
     progress(f"[learned-sfm] {nverified} verified pairs; running incremental mapping...")
 
