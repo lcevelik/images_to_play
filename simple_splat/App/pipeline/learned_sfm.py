@@ -47,6 +47,23 @@ def iter_candidate_pairs(num_images, pair_window=8):
     return pairs
 
 
+def _sanitize_matches(matches):
+    """Return deduplicated, valid match rows suitable for pycolmap."""
+    if matches is None:
+        return np.empty((0, 2), dtype=np.uint32)
+    arr = np.asarray(matches)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        arr = arr.reshape(-1, 2)
+    if arr.size == 0:
+        return np.empty((0, 2), dtype=np.uint32)
+    valid = (arr[:, 0] >= 0) & (arr[:, 1] >= 0)
+    arr = arr[valid]
+    if arr.size == 0:
+        return np.empty((0, 2), dtype=np.uint32)
+    arr = np.unique(arr, axis=0)
+    return arr.astype(np.uint32)
+
+
 def reset_output_dir(output_dir):
     """Remove stale SfM artifacts so a re-run starts from a clean database."""
     if not output_dir:
@@ -158,9 +175,9 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
         with torch.no_grad():
             m = matcher({'image0': feats[a], 'image1': feats[b]})
         matches = rbd(m)['matches'].cpu().numpy()    # [M,2] indices
-        if len(matches) < min_matches:
+        mu = _sanitize_matches(matches)
+        if len(mu) < min_matches:
             continue
-        mu = matches.astype(np.uint32)
         db.write_matches(image_ids[a], image_ids[b], mu)
         tvg = pycolmap.estimate_two_view_geometry(
             cams_by_size[sizes[a]], kpts[a].astype(np.float64),

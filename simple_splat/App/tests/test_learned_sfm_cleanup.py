@@ -3,6 +3,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pipeline.learned_sfm as learned_sfm
 
@@ -29,3 +31,12 @@ def test_iter_candidate_pairs_uses_a_window_for_large_sets():
     assert any(b - a > 2 for a, b in pairs)
     assert all(b - a <= 8 for a, b in pairs)
     assert len(pairs) == len(set(pairs))
+
+
+def test_sanitize_matches_removes_invalid_and_duplicate_rows():
+    matches = np.array([[0, 3], [0, 3], [1, 4], [-1, 2]], dtype=np.int64)
+
+    cleaned = learned_sfm._sanitize_matches(matches)
+
+    assert cleaned.dtype == np.uint32
+    assert cleaned.tolist() == [[0, 3], [1, 4]]
