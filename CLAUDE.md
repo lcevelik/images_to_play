@@ -154,10 +154,14 @@ The bundled `brush_app.exe` is **Brush v0.3.0** (ArthurBrussee/brush). Hard-won 
 
 ### Python dependencies
 
-Installed in the system Python (3.14). Key packages and their non-obvious requirements:
+Installed in the system Python — **3.12** at `C:\Users\LuxMC\AppData\Local\Programs\Python\Python312\python.exe` (torch 2.13.0+cu126, gsplat 1.5.3, pycolmap 4.0.3). The Python 3.14 install this file used to name is **gone**; so is VS2022 Professional. Verify the toolchain before trusting any path here — a stale entry cost a full debugging session on 2026-08-05.
+Key packages and their non-obvious requirements:
 - `torch` must be the **CUDA build** (`torch==2.x+cu126`), not `+cpu`. Install with `--index-url https://download.pytorch.org/whl/cu126 --force-reinstall`.
 - `pycolmap` — **optional**, and absent from the Lite bundle (`LITE_REQUIREMENTS` omits it; only `MCMC_REQUIREMENTS`/Full ships it). Everything on the Lite path reads COLMAP `*.bin` with the pure-`struct` readers in `pipeline/sparse_preview.py` (`_read_points3D_bin` / `_read_cameras_bin` / `_read_images_bin`, verified bit-identical to pycolmap on the Mip-360 garden model). pycolmap is only reached for `.txt` reconstructions, the "detailed stats" log line, and the Full-only modules (`learned_sfm`, `depth_seed`, `combine_splats`, `gsplat_mcmc_trainer`). **When adding a Lite-path code path, use the struct readers — do not add a hard pycolmap import.**
-- `gsplat` — required by ml-sharp at import time even if rendering is not used. **JIT-compiles its CUDA kernels on first use** — needs MSVC `cl.exe` on PATH (app.py discovers and adds it at startup; for standalone scripts, add `C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\<ver>\bin\Hostx64\x64` to PATH). First compile takes ~10 min; cached afterwards.
+- `gsplat` — required by ml-sharp at import time even if rendering is not used. **JIT-compiles its CUDA kernels on first use** (~100 s, then cached in `%LOCALAPPDATA%\torch_extensions`). No prebuilt wheel exists for this stack — gsplat's wheel index stops at torch 2.4 / cu124 / cp310 — so the JIT is the *only* path, and it needs **all three** of these or it fails:
+  1. **A CUDA toolkit matching torch's build.** `CUDA_PATH` pointed at v11.8 whose nvcc rejects `-std=c++20` (`nvcc fatal: Value 'c++20' is not defined for option 'std'`), so every kernel failed. `recipes.py:_cuda_env()` now resolves the toolkit matching `torch.version.cuda` (v12.6 here) instead of trusting the inherited env.
+  2. **MSVC 19.30+ (VS2022).** nvcc refuses `-std=c++20` with older hosts — VS2019's 19.29 silently drops the flag and torch's headers then fail with `c10::detail has no member torchCheckFail`. Installed here: **VS2022 BuildTools 14.44** at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...\Hostx64\x64`. `run_glomap.py:add_msvc_to_path()` finds it (moved there from app.py so pipeline modules need not import Flask).
+  3. **A LOCAL PATCH to gsplat.** `site-packages/gsplat/cuda/_backend.py` hardcodes GCC flags (`-O3`, `-Wno-attributes`) with no Windows branch, and MSVC rejects them (`cl : Command line error D8021`). Patched to emit `/O2` on `os.name == "nt"`. **This lives outside the repo — any `pip install --force-reinstall gsplat` reverts it and MCMC breaks again with D8021.** Upstream 1.5.3 is the latest release and still has the bug.
 - `pytorch-msssim` — Gaussian-windowed SSIM for the MCMC trainer loss. Do NOT replace with a hand-rolled avg_pool SSIM: its biased border statistics destroy training (verified: 32 dB vs 10.5 dB PSNR on synthetic data).
 
 ### Viewer integration
@@ -167,6 +171,8 @@ SuperSplat is served from `simple_splat/App/static/supersplat/`. The viewer load
 /static/supersplat/index.html?load=/ply/<job_id>.ply
 ```
 The `index.js` bundle is **not committed** — it must be built from `supersplat-src/` (see below). The `index.js.map` source map is committed; replace it when rebuilding.
+
+**A missing `index.js` fails SILENTLY**: `index.html`'s whole body is `<script type="module" src="./index.js">`, so a 404 there renders a blank page with a working `/ply` route behind it — it looks like the splat failed to train. This bit a real session on 2026-08-06; the working tree had `index.css`/`sw.js`/`index.js.map` but no `index.js`. Any fresh clone starts in that state. Check with `curl -I localhost:5000/static/supersplat/index.js` before suspecting the pipeline, and rebuild with `npm install && npm run build` in `supersplat-src/` (~30 s; current build is SuperSplat 2.24.4, 5 MB). A hard refresh may be needed afterwards — `sw.js` is a service worker and caches the broken page.
 
 ---
 
@@ -296,9 +302,19 @@ Trainer selector in UI: "Brush" (default) / "gsplat MCMC". Branches in `process_
 | high    | 200K–2M     | 1M–10M          | up to cap |
 | quality / expert | 500K–5M | 2M–30M     | up to cap |
 
-MCMC converges to `cap_max`. When omitted it **auto-scales** to `sparse_pts × 30` clamped to **500k–2M** (`gsplat_mcmc_trainer.py`); app.py passes `config.get('mcmc_cap')` (None → auto). Explicit values still work; on the RTX 8000 (48 GB) the cap can safely go to 2–4M. No UI knob yet (PROJECT.md TODO). Note: the cap is a **ceiling, not a target** — MCMC fills toward it gradually, so a high cap needs enough steps (this 74-photo scene reaches its ~940k auto-cap; 4M only filled by step ~10.5k of a 50k run).
+MCMC converges to `cap_max`. When omitted it **auto-scales** to `sparse_pts × 30` clamped to **500k–2M** (`gsplat_mcmc_trainer.py`); app.py passes `config.get('mcmc_cap')` (None → auto). Explicit values are still clamped by a VRAM-derived ceiling (~1.5 KB/Gaussian × 0.7 safety, ≤8M). No UI knob yet (PROJECT.md TODO). Note: the cap is a **ceiling, not a target** — MCMC fills toward it gradually, so a high cap needs enough steps (this 74-photo scene reaches its ~940k auto-cap; 4M only filled by step ~10.5k of a 50k run).
 
-**Dense MVS:** all presets ship `dense: false` (MVS adds nothing for splat training). If enabled via `enable_dense`, with the RTX 8000 the `patch_match_stereo` cache can be raised to 44GB (`--PatchMatchStereo.cache_size 44`) and `fusion_min_pixels` lowered to 1 for maximum density.
+**Dense MVS:** all presets ship `dense: false` (MVS adds nothing for splat training). If enabled via `enable_dense`, a 48 GB card allows `patch_match_stereo` cache up to 44GB (`--PatchMatchStereo.cache_size 44`) and `fusion_min_pixels` 1 for maximum density.
+
+### GPU: probe, don't assume
+
+**This box is 2× NVIDIA RTX A6000 (49 GB each), driver 581.15** — *not* the single Quadro RTX 8000 that earlier notes describe. Treat any hardware claim here as stale until re-checked with `nvidia-smi`.
+
+`recipes.py:_system_profile()` probes free VRAM at runtime and picks the MCMC GPU, Gaussian cap, Brush resolution and parallel-vs-sequential mode. Settings on a ≥24 GB card are unchanged from the validated run (4M / 3968 / parallel); scaling is **downward only**, since an over-large cap costs quality rather than adding it.
+
+Two gotchas:
+- **Brush is wgpu, not CUDA** — `CUDA_VISIBLE_DEVICES` does not move it, and two identical cards make `WGPU_ADAPTER_NAME` useless. It always takes the default adapter (GPU 0), so the only lever is moving **MCMC** off that card (`SPLAT_MCMC_GPU` to override). Brush's actual placement is unverified.
+- **`nvidia-smi` per-GPU memory is unreliable on Windows/WDDM** — both cards report identical `memory.used` regardless of load, and compute-app queries return `[Insufficient Permissions]`. To confirm which physical GPU a process bound to, compare `torch.cuda.get_device_properties(0).uuid` against `nvidia-smi --query-gpu=index,uuid`.
 
 **Image count guide:**
 - <20 images → use `low` preset (high/medium waste time and produce fewer points due to strict filters)
@@ -309,6 +325,18 @@ MCMC converges to `cap_max`. When omitted it **auto-scales** to `sparse_pts × 3
 ---
 
 ## Status Log
+
+**2026-08-06 — MCMC had NEVER run; four stacked blockers fixed + the pipeline made hardware-aware. Branch `fix/gpu-aware-production-pipeline` (4b25df8).**
+**MCMC never completed a single training step on this machine, on any job** — gsplat JIT-compiles its CUDA kernels and the toolchain was broken in four ways, each hiding the next, so every Production job silently took the Brush-only fallback and reported `status: completed`:
+(1) `CUDA_PATH` → **v11.8**, whose nvcc rejects the `-std=c++20` torch 2.13 requires (v12.6 was installed alongside it) → `recipes.py:_cuda_env()` now picks the toolkit matching `torch.version.cuda`;
+(2) the only MSVC was **VS2019 (19.29)** — nvcc needs 19.30+ for c++20, silently drops the flag, then torch headers fail with `c10::detail has no member torchCheckFail` → installed **VS2022 BuildTools 14.44**;
+(3) gsplat 1.5.3 `_backend.py` passes **GCC flags to MSVC** (`-O3`, `-Wno-attributes` → `cl : Command line error D8021`) → **local patch in site-packages, reverted by any gsplat reinstall** (upstream 1.5.3 is latest and still broken; no prebuilt wheel exists past torch 2.4/cu124/cp310);
+(4) **`pytorch-msssim` was missing**, so the trainer had been silently falling back to L1-only loss.
+**Brush was ALSO being killed while healthy** — a flat 900 s stall timer vs real export intervals of 18–21 min (exports slow as the splat densifies), so a "successful" job shipped a 25%-trained salvage. Now `max(1800, 3× slowest interval)`.
+**Hardware assumptions removed:** the recipe hardcoded one 48 GB card. `_system_profile()` now probes VRAM and picks MCMC's GPU, the cap, Brush resolution, and parallel-vs-sequential — unchanged on ≥24 GB, scaling **down** only. This box is **2× RTX A6000**, not the Quadro RTX 8000 in older notes. Also added `_existing_scene()` resume (skip learned-SfM/undistort after a crash) and fixed `test_mcmc_smoke.py`'s stub, which had drifted from `load_colmap_dataset(max_size=)` and failed before training — the test is not in CI (needs CUDA+MSVC), so nobody noticed.
+**VERIFIED:** full Production run completed — MCMC 30k steps filling a 4M cap → pruned to 1,539,910; Brush 30k steps (all four exports); combine σ=1.7 → 2,642,774 Gaussians; compress 623.7 MB → 162.0 MB. Smoke test 14.4 → 34.3 dB. Device pinning confirmed by CUDA UUID.
+**Also fixed: the viewer showed a BLANK PAGE** — `static/supersplat/index.js` was absent (gitignored, never built here), and `index.html` is nothing but `<script src="./index.js">`, so it 404s silently while `/ply` serves fine. Rebuilt from `supersplat-src` (SuperSplat 2.24.4). **Any fresh clone starts blank the same way.**
+**STALE-DOC WARNING:** this file named Python 3.14 and VS2022 Professional, both long gone from the box; that sent the first diagnosis down the wrong path entirely. Re-verify toolchain paths before trusting them.
 
 **2026-07-03 — Full codebase audit: 11 bugs fixed, ~600 lines of dead code removed (4 commits, b0f4614..ad9dd96).**
 **Two long-standing "KNOWN TODOs" are now CLOSED:** (1) the `compress_ply` SH1/SH2 channel-major bug (green tint) — fixed with per-channel band selection R[0:c]/G[in:in+c]/B[2*in:2*in+c], verified with a synthetic R=1/G=2/B=3 splat round-trip; (2) `_load_presets()` had been loading from `pipeline/presets/` (nonexistent) since the 2026-06-14 reorg — **the JSON preset system was silently dead** and every job used the stale inline dict (`quality` preset didn't even exist there → ran as medium). Fixed to `parent.parent / "presets"`, verified all 5 presets load.
