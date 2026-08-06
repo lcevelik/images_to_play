@@ -112,6 +112,30 @@ def get_colmap_path():
 
     return _colmap_path_cache
 
+def add_msvc_to_path():
+    """Put MSVC's cl.exe on PATH so gsplat can JIT-compile its CUDA kernels.
+    Searches all VS versions (2022 before 2019) and editions.
+    Returns the directory added, or None if no cl.exe was found."""
+    vs_roots = [
+        r"C:\Program Files\Microsoft Visual Studio",
+        r"C:\Program Files (x86)\Microsoft Visual Studio",
+    ]
+    for vs_root in vs_roots:
+        if not os.path.exists(vs_root):
+            continue
+        for year in sorted(os.listdir(vs_root), reverse=True):  # 2022 before 2019
+            for edition in ("BuildTools", "Enterprise", "Professional", "Community"):
+                msvc_bin = os.path.join(vs_root, year, edition, "VC", "Tools", "MSVC")
+                if not os.path.exists(msvc_bin):
+                    continue
+                for v in sorted(os.listdir(msvc_bin), reverse=True):
+                    cl_dir = os.path.join(msvc_bin, v, "bin", "Hostx64", "x64")
+                    if os.path.exists(os.path.join(cl_dir, "cl.exe")):
+                        if cl_dir not in os.environ.get("PATH", ""):
+                            os.environ["PATH"] = cl_dir + ";" + os.environ.get("PATH", "")
+                        return cl_dir
+    return None
+
 def get_available_ram_mb():
     """Return available system RAM in MB. Cross-platform."""
     try:

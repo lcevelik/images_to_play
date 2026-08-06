@@ -123,7 +123,9 @@ def main():
     device = torch.device("cuda")
 
     dataset = build_synthetic_dataset(device)
-    trainer_mod.load_colmap_dataset = lambda parent_dir: dataset
+    # **kwargs so the stub keeps matching when the real loader gains options
+    # (it grew max_size, which broke this test with an unexpected-kwarg TypeError)
+    trainer_mod.load_colmap_dataset = lambda parent_dir, **kwargs: dataset
 
     losses, psnrs, counts = [], [], []
 

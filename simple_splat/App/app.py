@@ -104,30 +104,6 @@ def resize_images_for_colmap(image_folder, max_size=3840, backup_folder=None):
                 failures.append(err)
     return resized, failures
 
-def add_msvc_to_path():
-    """Put MSVC's cl.exe on PATH so gsplat can JIT-compile its CUDA kernels.
-    Searches all VS versions (2022 before 2019) and editions.
-    Returns the directory added, or None if no cl.exe was found."""
-    vs_roots = [
-        r"C:\Program Files\Microsoft Visual Studio",
-        r"C:\Program Files (x86)\Microsoft Visual Studio",
-    ]
-    for vs_root in vs_roots:
-        if not os.path.exists(vs_root):
-            continue
-        for year in sorted(os.listdir(vs_root), reverse=True):  # 2022 before 2019
-            for edition in ("BuildTools", "Enterprise", "Professional", "Community"):
-                msvc_bin = os.path.join(vs_root, year, edition, "VC", "Tools", "MSVC")
-                if not os.path.exists(msvc_bin):
-                    continue
-                for v in sorted(os.listdir(msvc_bin), reverse=True):
-                    cl_dir = os.path.join(msvc_bin, v, "bin", "Hostx64", "x64")
-                    if os.path.exists(os.path.join(cl_dir, "cl.exe")):
-                        if cl_dir not in os.environ.get("PATH", ""):
-                            os.environ["PATH"] = cl_dir + ";" + os.environ.get("PATH", "")
-                        return cl_dir
-    return None
-
 def filter_blurry_images(image_folder, blur_threshold=100.0):
     """Detect blurry images using Laplacian variance. Returns list of (filename, score).
     Does NOT delete images — just reports for logging."""
@@ -1078,6 +1054,7 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
         add_log(f"COLMAP cached at: {colmap_path}", "INFO")
 
         # Add MSVC cl.exe to PATH for gsplat JIT CUDA kernel compilation.
+        from pipeline.run_glomap import add_msvc_to_path
         _cl_dir = add_msvc_to_path()
         if _cl_dir:
             add_log(f"MSVC cl.exe found at: {_cl_dir}", "INFO")
@@ -2374,7 +2351,8 @@ def camera_tracking():
     try:
         poses = extract_camera_poses(sparse_dir)
         # If this job came from a video, match its real frame rate (overrides the query fps).
-        v_fps, fbx_frame_numbers = video_frame_timing(output_path, len(poses))
+        v_fps, fbx_frame_numbers = video_frame_timing(output_path, len(poses),
+                                                      names=[p['name'] for p in poses])
         if v_fps:
             fps = v_fps
         results = {'poses_count': len(poses), 'fps': fps, 'files': []}
@@ -2427,6 +2405,7 @@ def request_too_large(error):
 
 if __name__ == '__main__':
     # Add MSVC cl.exe to PATH at startup so gsplat JIT compilation works for all subprocesses.
+    from pipeline.run_glomap import add_msvc_to_path
     _startup_cl_dir = add_msvc_to_path()
     if _startup_cl_dir:
         print(f"[startup] MSVC cl.exe added to PATH: {_startup_cl_dir}")

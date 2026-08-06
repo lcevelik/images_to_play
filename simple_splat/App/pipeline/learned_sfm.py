@@ -18,7 +18,30 @@ import os
 import glob
 import shutil
 import uuid
+from pathlib import Path
+
 import numpy as np
+
+
+def _evenly_spaced(items, count):
+    """Return `count` evenly spaced entries from `items` (first and last always kept).
+
+    `count` <= 0 means "no cap" — the list is returned untouched.
+    """
+    items = list(items)
+    if count <= 0 or len(items) <= count:
+        return items
+    if count == 1:
+        return items[:1]
+    return [items[round(i * (len(items) - 1) / (count - 1))] for i in range(count)]
+
+
+def select_image_subset(image_dir, max_images=200):
+    """Return an evenly spaced subset of a folder's images to keep SfM tractable."""
+    exts = ('.jpg', '.jpeg', '.png')
+    imgs = sorted(str(p) for p in Path(image_dir).glob('*')
+                  if p.is_file() and p.suffix.lower() in exts)
+    return _evenly_spaced(imgs, max_images)
 
 
 def iter_candidate_pairs(num_images, pair_window=8):
@@ -97,7 +120,7 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
                     min_matches=15, progress=print, extractor='superpoint',
                     keep_two_view_tracks=False, mapper_min_angle=1.5,
                     mapper_max_reproj=4.0, mapper_min_matches=15,
-                    pair_window=8):
+                    pair_window=8, max_images=200):
     import torch
     from lightglue import LightGlue
     from lightglue.utils import load_image, rbd
@@ -119,6 +142,12 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
 
     exts = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
     imgs = sorted([f for f in glob.glob(os.path.join(image_dir, '*')) if f.endswith(exts)])
+    # Cap the set BEFORE the >=2 guard so an over-tight cap fails here rather than
+    # handing a 1-image set to the mapper.
+    subset = _evenly_spaced(imgs, max_images)
+    if len(subset) < len(imgs):
+        progress(f"[learned-sfm] reduced from {len(imgs)} images to {len(subset)} evenly spaced images")
+        imgs = subset
     if len(imgs) < 2:
         progress(f"[learned-sfm] need >=2 images, found {len(imgs)}")
         return None
@@ -151,6 +180,11 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
         return pycolmap.Camera(model='SIMPLE_RADIAL', width=W, height=H,
                                params=[focal, W / 2.0, H / 2.0, 0.0])
 
+    def _log_match_issue(pair, matches, label):
+        progress(f"[learned-sfm] {label} pair={pair} rows={matches.shape[0] if hasattr(matches, 'shape') else None} "
+                 f"dtype={getattr(matches, 'dtype', None)} min={matches.min() if matches.size else None} "
+                 f"max={matches.max() if matches.size else None}")
+
     cam_ids = {}  # (W, H) -> camera_id
     cams_by_size = {}
     for size in sizes:
@@ -178,7 +212,11 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
         mu = _sanitize_matches(matches)
         if len(mu) < min_matches:
             continue
-        db.write_matches(image_ids[a], image_ids[b], mu)
+        try:
+            db.write_matches(image_ids[a], image_ids[b], mu)
+        except Exception as exc:
+            _log_match_issue((a, b), mu, f"match-write failed: {exc}")
+            raise
         tvg = pycolmap.estimate_two_view_geometry(
             cams_by_size[sizes[a]], kpts[a].astype(np.float64),
             cams_by_size[sizes[b]], kpts[b].astype(np.float64), mu, opts)
@@ -198,19 +236,22 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     # any resulting noise, so trading a little precision for density is the right call.
     opt = pycolmap.IncrementalPipelineOptions()
     opt.min_num_matches = max(8, mapper_min_matches)
-    opt.init_image_id1 = 1
-    opt.init_image_id2 = min(2, len(imgs))
-    opt.init_num_trials = 100
-    opt.init_max_error = 8.0
-    opt.init_min_num_inliers = 20
+    opt.init_image_id1 = -1
+    opt.init_image_id2 = -1
+    opt.init_num_trials = 200
+    opt.mapper.init_min_num_inliers = max(8, min(40, mapper_min_matches))
+    opt.mapper.init_max_error = max(8.0, mapper_max_reproj * 2.0)
+    opt.mapper.init_max_forward_motion = 0.95
+    opt.mapper.init_min_tri_angle = max(0.5, min(6.0, mapper_min_angle * 0.5))
+    opt.mapper.init_max_reg_trials = 10
     opt.triangulation.ignore_two_view_tracks = (not keep_two_view_tracks)
     opt.triangulation.min_angle = max(0.1, mapper_min_angle)
     opt.triangulation.complete_max_reproj_error = max(8.0, mapper_max_reproj)
     opt.triangulation.merge_max_reproj_error = max(8.0, mapper_max_reproj)
-    opt.ba_global.max_num_iterations = 50
-    opt.ba_local.max_num_iterations = 25
+    opt.ba_global_max_num_iterations = 50
+    opt.ba_local_max_num_iterations = 25
     progress(f"[learned-sfm] mapper: keep_2view={keep_two_view_tracks}, min_angle={mapper_min_angle}, "
-             f"max_reproj={mapper_max_reproj}, min_matches={mapper_min_matches}")
+             f"max_reproj={mapper_max_reproj}, min_matches={mapper_min_matches}, init_pair_search=auto")
     recs = pycolmap.incremental_mapping(db_path, image_dir, output_dir, options=opt)
     if not recs:
         progress("[learned-sfm] mapping produced NO reconstruction")
@@ -224,7 +265,7 @@ def run_learned_sfm(image_dir, output_dir, device='cpu', max_kpts=2048,
     return sparse_dir
 
 
-if __name__ == "__main__":
+def main(argv=None):
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--images", "-i", required=True)
@@ -233,10 +274,18 @@ if __name__ == "__main__":
     p.add_argument("--max-kpts", type=int, default=2048)
     p.add_argument("--extractor", default="superpoint", choices=["superpoint", "aliked", "disk"])
     p.add_argument("--pair-window", type=int, default=8)
-    a = p.parse_args()
+    p.add_argument("--max-images", type=int, default=200)
+    a = p.parse_args(argv)
     import time
     t0 = time.time()
     r = run_learned_sfm(a.images, a.output, device=a.device, max_kpts=a.max_kpts,
                         extractor=a.extractor, pair_window=a.pair_window,
+                        max_images=a.max_images,
                         progress=lambda m: print(f"[{int(time.time()-t0)}s] {m}", flush=True))
     print("RESULT:", r)
+    # non-zero exit signals failure so the recipe wrapper doesn't hand an empty model to COLMAP
+    return 0 if r else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

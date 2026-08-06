@@ -320,11 +320,22 @@ def _export_gltf_manual(poses, output_path, fps=30):
     return output_path
 
 
-def video_frame_timing(job_dir, num_poses):
+def _extracted_index(name, fallback):
+    """Recover the extraction index from a `frame_00042.jpg` filename."""
+    digits = re.findall(r'\d+', os.path.splitext(os.path.basename(name))[0])
+    return int(digits[-1]) if digits else fallback
+
+
+def video_frame_timing(job_dir, num_poses, names=None):
     """For a video-derived job, return (fps, frame_numbers) from <job_dir>/video_info.json
     (written during frame extraction) so an exported camera matches the SOURCE video's frame
     rate, with keyframes on their original source-frame numbers. Returns (None, None) when the
-    job was not a video or the info is missing/invalid (caller then keeps its default fps)."""
+    job was not a video or the info is missing/invalid (caller then keeps its default fps).
+
+    Pass `names` (the poses' image filenames) whenever the reconstruction may cover only a
+    SUBSET of the extracted frames — learned-SfM caps long sequences at `--max-images`, and
+    without the real filenames the keys would land on consecutive frames and compress the
+    timeline against the plate."""
     try:
         with open(os.path.join(job_dir, 'video_info.json')) as f:
             info = json.load(f)
@@ -332,7 +343,11 @@ def video_frame_timing(job_dir, num_poses):
         interval = max(1, int(info.get('frame_interval') or 1))
         if fps <= 0:
             return None, None
-        return fps, [i * interval for i in range(num_poses)]
+        if names:
+            idxs = [_extracted_index(n, i) for i, n in enumerate(names)]
+        else:
+            idxs = list(range(num_poses))
+        return fps, [i * interval for i in idxs]
     except Exception:
         return None, None
 
