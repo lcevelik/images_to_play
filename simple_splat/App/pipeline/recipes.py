@@ -186,29 +186,49 @@ def _gpu_free_mib(log=None):
         return []
 
 
-def _mcmc_gpu(log):
+def _gpu_busy(threshold=20):
+    """Indices of GPUs currently doing real work, by utilization percent.
+
+    Utilization is the ONLY trustworthy per-GPU signal on Windows/WDDM — memory.used
+    reports the same figure for every card regardless of load, and per-process queries
+    return [Insufficient Permissions]."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=60, creationflags=_NO_WINDOW)
+        return [i for i, v in enumerate(int(x) for x in out.stdout.split()
+                                        if x.strip().isdigit()) if v >= threshold]
+    except Exception:
+        return []
+
+
+def _mcmc_gpu(log, avoid=None):
     """GPU index to pin MCMC to, or None to leave it on the default device.
 
-    Brush is a wgpu app: CUDA_VISIBLE_DEVICES does not move it, and two identical cards
-    make WGPU_ADAPTER_NAME useless — it always takes the default adapter (GPU 0). So the
-    only lever is MCMC, and moving it to another card is enough to stop the two trainers
-    sharing one. With a single GPU they share it, as they always have.
-    Override with SPLAT_MCMC_GPU."""
+    Brush is a wgpu app, so CUDA_VISIBLE_DEVICES cannot move it and two identical cards
+    make WGPU_ADAPTER_NAME useless — MCMC is the only one of the pair we can place. The
+    first version of this assumed wgpu takes GPU 0 and moved MCMC to GPU 1; on a 2x A6000
+    box wgpu actually picked the card CUDA calls 1, so that put BOTH trainers on one GPU
+    and left the other idle. Hence `avoid`: the caller starts Brush first, observes which
+    card it took, and passes it here. Override with SPLAT_MCMC_GPU."""
     override = os.environ.get("SPLAT_MCMC_GPU")
     if override and override.strip().lstrip('-').isdigit():
         idx = int(override)
         if idx < 0:   # explicit opt-out: let torch pick, same as a single-GPU box
             log("GPU plan: MCMC left on the default device (SPLAT_MCMC_GPU=-1)")
             return None
-        log(f"GPU plan: MCMC pinned to GPU {idx} (SPLAT_MCMC_GPU); Brush on the default adapter")
+        log(f"GPU plan: MCMC pinned to GPU {idx} (SPLAT_MCMC_GPU)")
         return idx
 
     free = _gpu_free_mib(log)
     if len(free) >= 2:
-        # most free VRAM among the non-default cards — Brush keeps GPU 0
-        idx = max(range(1, len(free)), key=lambda i: free[i])
-        log(f"GPU plan: {len(free)} GPUs — MCMC -> GPU {idx} ({free[idx]:,} MiB free), "
-            f"Brush -> GPU 0 ({free[0]:,} MiB free, default adapter)")
+        candidates = [i for i in range(len(free)) if i not in (avoid or [])]
+        if not candidates:      # every card is busy — sharing is the only option left
+            log(f"GPU plan: all {len(free)} GPUs busy — MCMC shares with Brush")
+            return None
+        idx = max(candidates, key=lambda i: free[i])
+        where = f"avoiding GPU {avoid}" if avoid else "no Brush GPU detected"
+        log(f"GPU plan: {len(free)} GPUs — MCMC -> GPU {idx} ({free[idx]:,} MiB free), {where}")
         return idx
     if free:
         log(f"GPU plan: single GPU ({free[0]:,} MiB free) — MCMC and Brush share it")
@@ -230,13 +250,13 @@ def _system_profile(log):
     Returns {mcmc_gpu, mcmc_cap, brush_res, parallel}.
     """
     free = _gpu_free_mib(log)
-    mcmc_gpu = _mcmc_gpu(log)
 
-    # Headroom of the card each trainer will actually get. With 2+ cards they don't
-    # share, so each is sized by its own card; on one card they split it.
+    # Headroom of the card each trainer will actually get. With 2+ cards they end up on
+    # different ones (see _mcmc_gpu), so each is sized by a whole card; on one card they
+    # split it. Which card MCMC gets is decided later — only once Brush has claimed one.
     if len(free) >= 2:
-        mcmc_mib = free[mcmc_gpu] if mcmc_gpu is not None and mcmc_gpu < len(free) else free[0]
-        brush_mib, parallel = free[0], True
+        mcmc_mib = brush_mib = max(free)
+        parallel = True
     elif free:
         # One card. Decide the mode FIRST, because it determines the headroom: run both
         # at once only if the card is big enough to halve, otherwise run them one after
@@ -254,7 +274,7 @@ def _system_profile(log):
         return fallback
 
     profile = {
-        'mcmc_gpu': mcmc_gpu,
+        'multi_gpu': len(free) >= 2,
         'mcmc_cap': _tier(mcmc_mib, [(20_000, 4_000_000), (10_000, 2_000_000)], 1_000_000),
         'brush_res': _tier(brush_mib, [(20_000, 3968), (10_000, 2560)], 1600),
         'parallel': parallel,
@@ -436,16 +456,15 @@ def run_production(images_dir, job_dir, status_cb, log, export_fbx=False):
     os.makedirs(os.path.dirname(mcmc), exist_ok=True)
     errors, brush_holder = {}, {}
 
-    mcmc_env = dict(_cuda_env())
-    if profile['mcmc_gpu'] is not None:
-        mcmc_env["CUDA_VISIBLE_DEVICES"] = str(profile['mcmc_gpu'])
-
-    def _train_mcmc():
+    def _train_mcmc(gpu=None):
+        env = dict(_cuda_env())
+        if gpu is not None:
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu)
         try:
             _py(f"from pipeline.gsplat_mcmc_trainer import train_mcmc\n"
                 f"train_mcmc(r'{scene}', total_steps=30000, cap_max={profile['mcmc_cap']}, sh_degree=3, use_lpips=True,\n"
                 f"           strategy_name='mcmc', export_opacity_min=0.03, output_ply_path=r'{mcmc}')",
-                log, timeout=18000, env=mcmc_env)
+                log, timeout=18000, env=env)
         except Exception as e:
             errors['mcmc'] = e
 
@@ -458,13 +477,24 @@ def run_production(images_dir, job_dir, status_cb, log, export_fbx=False):
             errors['brush'] = e
 
     if profile['parallel']:
-        t_mcmc, t_brush = threading.Thread(target=_train_mcmc), threading.Thread(target=_train_brush)
-        t_mcmc.start(); t_brush.start()
+        # Brush goes FIRST and picks its own adapter (wgpu, unsteerable). Watch which
+        # card lights up, then give MCMC a different one — assuming Brush takes GPU 0 put
+        # both trainers on the same card and left the other idle on a 2x A6000 box.
+        t_brush = threading.Thread(target=_train_brush)
+        t_brush.start()
+        busy = []
+        if profile['multi_gpu']:
+            deadline = time.time() + 300
+            while time.time() < deadline and not busy and t_brush.is_alive():
+                time.sleep(15)
+                busy = _gpu_busy()
+        t_mcmc = threading.Thread(target=_train_mcmc, args=(_mcmc_gpu(log, avoid=busy),))
+        t_mcmc.start()
         t_mcmc.join(); t_brush.join()
     else:
         # Not enough VRAM to hold both at once — same work, ~2x the wall-clock, but it
         # finishes instead of one trainer OOMing the other out.
-        _train_mcmc()
+        _train_mcmc(_mcmc_gpu(log))
         _train_brush()
     if 'brush' in errors:
         raise RuntimeError("parallel training failed — " + "; ".join(f"{k}: {v}" for k, v in errors.items()))

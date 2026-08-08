@@ -143,7 +143,9 @@ app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'zip', 'mp4', 'mov', '
 # MAX_CONCURRENT_JOBS is derived from GPU_COUNT below (training is GPU-bound, so
 # more concurrent jobs than GPUs just makes every job slower and risks OOM).
 JOB_RETENTION_HOURS = 1  # Keep completed jobs in memory for 1 hour
-AUTO_CLEANUP_HOURS = 24  # Auto-cleanup job folders after 24 hours
+AUTO_CLEANUP_HOURS = 168  # Auto-cleanup job folders after 7 days. Was 24h, which
+                          # deleted a finished 3-hour Production run's splat, FBX and
+                          # logs the next day — cleanup does not spare final outputs.
 
 # Ensure directories exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -2232,7 +2234,15 @@ def download_file(job_id, file_type):
         if os.path.exists(job_folder):
             output_path = job_folder
             sparse_path = os.path.join(job_folder, 'sparse', '0')
-    
+
+    # Recipe jobs (draft/production) record ply_path but never output_path, so a job
+    # present in processing_status skipped the filesystem fallback above and 404'd even
+    # though its files were on disk. Fall back whenever the path is missing, not just
+    # when the job is unknown.
+    if not output_path and os.path.exists(job_folder):
+        output_path = job_folder
+        sparse_path = sparse_path or os.path.join(job_folder, 'sparse', '0')
+
     if not output_path:
         return jsonify({'error': 'Job not found'}), 404
     
@@ -2295,10 +2305,10 @@ def download_tracking_file(job_id, filename):
     job_folder = _job_folder(job_id)
     if job_folder is None:
         return jsonify({'error': 'Invalid job id'}), 400
-    if job_id in processing_status:
-        output_path = processing_status[job_id].get('output_path')
-    else:
-        output_path = job_folder
+    # `or job_folder`: recipe jobs sit in processing_status WITHOUT an output_path, so
+    # keying on membership alone 404'd the FBX download for draft/production runs — the
+    # only jobs that produce an FBX in the first place.
+    output_path = (processing_status.get(job_id) or {}).get('output_path') or job_folder
 
     if not output_path:
         return jsonify({'error': 'Job not found'}), 404
