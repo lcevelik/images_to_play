@@ -789,6 +789,204 @@ function showResults(data) {
     } else {
         fbxBtn.style.display = 'none';
     }
+
+    // "Send to Production" — re-runs this job at production quality on the camera solve
+    // it already has. The server decides eligibility (it depends on what's on disk), so
+    // just honour can_promote rather than re-deriving it here.
+    const promoteBtn = document.getElementById('promoteBtn');
+    const promoteNote = document.getElementById('promoteNote');
+    const show = !!(data && data.can_promote);
+    promoteBtn.style.display = show ? 'inline-block' : 'none';
+    promoteNote.style.display = show ? 'block' : 'none';
+    promoteBtn.disabled = false;
+    promoteBtn.textContent = '⬆ Send to Production';
+
+    // Once a production run has replaced the result, the draft stays reachable for an A/B.
+    const draftBtn = document.getElementById('viewDraftBtn');
+    if (data && data.has_draft) {
+        draftBtn.href = `/static/supersplat/index.html?load=/ply/${currentJobId}/draft.ply`;
+        draftBtn.style.display = 'inline-block';
+    } else {
+        draftBtn.style.display = 'none';
+    }
+}
+
+/* ── Jobs tab ───────────────────────────────────── */
+function _agoLabel(epochSeconds) {
+    const mins = Math.max(0, (Date.now() / 1000 - epochSeconds) / 60);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return Math.round(mins) + ' min ago';
+    const hrs = mins / 60;
+    if (hrs < 24) return Math.round(hrs) + (Math.round(hrs) === 1 ? ' hour ago' : ' hours ago');
+    const days = Math.round(hrs / 24);
+    return days + (days === 1 ? ' day ago' : ' days ago');
+}
+
+async function loadJobs() {
+    const grid = document.getElementById('jobsGrid');
+    const empty = document.getElementById('jobsEmpty');
+    try {
+        const response = await fetch('/jobs');
+        const data = await response.json();
+        const jobs = (data && data.jobs) || [];
+        grid.innerHTML = '';
+        if (!jobs.length) {
+            empty.textContent = 'No jobs yet — create one from the Create tab.';
+            empty.style.display = 'block';
+            return;
+        }
+        empty.style.display = 'none';
+        jobs.forEach(job => grid.appendChild(buildJobCard(job)));
+    } catch (e) {
+        empty.textContent = 'Could not load jobs: ' + e;
+        empty.style.display = 'block';
+    }
+}
+
+function buildJobCard(job) {
+    const card = document.createElement('div');
+    card.className = 'job-card' + (job.job_id === currentJobId ? ' is-current' : '');
+
+    const running = job.status === 'processing';
+    const badge = running ? ['run', 'Running']
+                : job.status === 'completed' ? ['ok', job.quality || 'done']
+                : job.status === 'error' ? ['err', 'Failed']
+                : ['', job.status || 'unknown'];
+
+    const thumb = document.createElement(job.has_thumb ? 'img' : 'div');
+    thumb.className = 'job-thumb' + (job.has_thumb ? '' : ' placeholder');
+    if (job.has_thumb) {
+        thumb.src = `/jobs/${job.job_id}/thumb.jpg`;
+        thumb.alt = '';
+        thumb.loading = 'lazy';
+        // A job whose images were cleaned up still lists — don't leave a broken icon.
+        thumb.onerror = () => { thumb.replaceWith(Object.assign(document.createElement('div'),
+            { className: 'job-thumb placeholder', textContent: 'no preview' })); };
+    } else {
+        thumb.textContent = 'no preview';
+    }
+    thumb.onclick = () => selectJob(job.job_id);
+    card.appendChild(thumb);
+
+    const body = document.createElement('div');
+    body.className = 'job-body';
+    body.innerHTML = `
+        <div class="job-title">${job.job_id.slice(0, 8)}</div>
+        <div class="job-badges">
+            <span class="job-badge ${badge[0]}">${badge[1]}</span>
+            ${job.has_draft ? '<span class="job-badge">draft kept</span>' : ''}
+        </div>
+        <div class="job-meta">
+            ${_agoLabel(job.created)}${job.images ? ' · ' + job.images + ' images' : ''}
+            ${job.result_mb ? '<br>' + job.result_mb + ' MB result' : ''}
+            ${running && job.step ? '<br>' + job.step + ' (' + (job.progress || 0) + '%)' : ''}
+        </div>`;
+
+    const actions = document.createElement('div');
+    actions.className = 'job-actions';
+
+    const open = document.createElement('button');
+    open.className = 'job-btn' + (job.has_result || running ? ' primary' : '');
+    open.textContent = running ? 'Watch' : 'Open';
+    open.disabled = !job.has_result && !running;
+    open.onclick = () => selectJob(job.job_id);
+    actions.appendChild(open);
+
+    if (job.can_promote) {
+        const promote = document.createElement('button');
+        promote.className = 'job-btn';
+        promote.textContent = '⬆ Production';
+        // Point at the job directly rather than via selectJob(): sendToProduction() only
+        // needs currentJobId, and selectJob's async tail would race it re-rendering the
+        // result buttons this click is about to change.
+        promote.onclick = () => { currentJobId = job.job_id; _notifiedJob = null; sendToProduction(); };
+        actions.appendChild(promote);
+    }
+
+    body.appendChild(actions);
+    card.appendChild(body);
+    return card;
+}
+
+/* Attach the UI to an existing job — the way back in after a page reload, since the
+   browser otherwise only knows the job it uploaded itself this session. */
+async function selectJob(jobId, opts) {
+    const silent = opts && opts.silent;
+    currentJobId = jobId;
+    _notifiedJob = null;      // this run hasn't been announced to THIS page yet
+    resetPreview();
+    try {
+        const response = await fetch(`/status/${jobId}`);
+        const data = await response.json();
+        if (!response.ok) {
+            showError(data.error || 'Could not open that job');
+            return;
+        }
+        if (data.status === 'processing') {
+            // Re-attach to a run already in flight and resume the live view.
+            document.getElementById('idleState').style.display = 'none';
+            progressSection.classList.add('active');
+            resultSection.classList.remove('active');
+            errorMsg.style.display = 'none';
+            setTabDot('process', 'running');
+            processingStartTime = (data.started_at ? data.started_at * 1000 : Date.now());
+            startElapsedTimer();
+            if (!silent) switchTab('process');
+            pollStatus();
+            pollLogs();
+        } else {
+            updateStageTimings(data.stages);
+            showResults(data);
+            setTabDot('results', 'done');
+            if (!silent) switchTab('results');
+        }
+    } catch (e) {
+        showError('Could not open that job: ' + e);
+    }
+}
+
+async function sendToProduction() {
+    const btn = document.getElementById('promoteBtn');
+    if (!currentJobId || btn.disabled) return;
+    if (!confirm('Re-run this scene at production quality?\n\n'
+               + 'It reuses the camera solve you already have and retrains with MCMC + Brush '
+               + '(~2.5 hr). Your draft is kept and stays viewable.')) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+    try {
+        const response = await fetch(`/promote/${currentJobId}`, { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok) {
+            showError(data.error || 'Could not start the production run');
+            btn.disabled = false;
+            btn.textContent = '⬆ Send to Production';
+            return;
+        }
+        // Same job id, so the existing pollers just pick the new run up. Mirror
+        // startProcessing()'s reset of the Process tab, then hand back to pollStatus().
+        document.getElementById('idleState').style.display = 'none';
+        progressSection.classList.add('active');
+        resultSection.classList.remove('active');
+        document.getElementById('resultsEmpty').style.display = 'flex';
+        errorMsg.style.display = 'none';
+        setTabDot('process', 'running');
+        setTabDot('results', '');
+        switchTab('process');
+
+        resetPipelineStages();
+        progressFill.style.width = '0%';
+        document.getElementById('currentActivity').textContent = 'Production pipeline starting...';
+        _notifiedJob = null;          // re-arm the completion notification for this run
+        processingStartTime = Date.now();
+        startElapsedTimer();
+        pollStatus();
+        pollLogs();
+    } catch (e) {
+        showError('Could not start the production run: ' + e);
+        btn.disabled = false;
+        btn.textContent = '⬆ Send to Production';
+    }
 }
 
 async function exportCameraTracking() {
@@ -908,3 +1106,21 @@ async function openSplatFile(input) {
         alert('Error uploading file: ' + err.message);
     }
 }
+
+/* ── Startup: re-attach to a run already in flight ──
+   A reload wipes currentJobId, which used to strand a running job with no way back to
+   its progress. Ask the server what's running and silently re-attach (no tab switch —
+   the user may have reloaded intending to start something new). */
+(async function reattachRunningJob() {
+    try {
+        const response = await fetch('/jobs');
+        const data = await response.json();
+        const running = ((data && data.jobs) || []).find(j => j.status === 'processing');
+        if (running) {
+            await selectJob(running.job_id, { silent: true });
+            setTabDot('process', 'running');
+        }
+    } catch (e) {
+        /* listing is best-effort — never block the page on it */
+    }
+})();

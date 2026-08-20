@@ -699,6 +699,78 @@ body::after {
 .btn-primary { background: var(--grad); color: white; box-shadow: 0 4px 18px rgba(139, 92, 246, 0.35); }
 .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 26px rgba(139, 92, 246, 0.5); }
 
+/* Send to Production. A <button>, not an <a> like its neighbours, so the UA's default
+   grey background has to be overridden explicitly. */
+#promoteBtn {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+}
+#promoteBtn:hover:not(:disabled) { border-color: rgba(139, 92, 246, 0.65); transform: translateY(-2px); }
+#promoteBtn:disabled { opacity: 0.55; cursor: default; transform: none; }
+.promote-note {
+    margin-top: 8px;
+    font-size: 0.74em;
+    line-height: 1.5;
+    color: var(--text-3);
+    max-width: 34ch;
+}
+
+/* ── Jobs tab ─────────────────────────────────── */
+.jobs-wrap { height: 100%; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
+.jobs-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.jobs-sub { font-size: 0.78em; color: var(--text-3); margin-top: 4px; }
+.jobs-grid {
+    flex: 1;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    align-content: start;
+    padding-right: 4px;
+}
+.jobs-empty { color: var(--text-3); font-size: 0.85em; padding: 8px 2px; }
+.job-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+}
+.job-card:hover { border-color: rgba(139, 92, 246, 0.55); transform: translateY(-2px); }
+.job-card.is-current { border-color: rgba(139, 92, 246, 0.9); }
+.job-thumb {
+    width: 100%; aspect-ratio: 16 / 10; object-fit: cover;
+    background: var(--surface-2); display: block; cursor: pointer;
+}
+.job-thumb.placeholder { display: flex; align-items: center; justify-content: center; color: var(--text-3); font-size: 0.75em; }
+.job-body { padding: 11px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.job-title { font-size: 0.82em; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+.job-meta { font-size: 0.72em; color: var(--text-3); line-height: 1.55; }
+.job-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+.job-badge {
+    font-size: 0.64em; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 3px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-2);
+}
+.job-badge.ok { border-color: rgba(52, 211, 153, 0.5); color: var(--success); }
+.job-badge.run { border-color: rgba(139, 92, 246, 0.6); color: #a78bfa; }
+.job-badge.err { border-color: rgba(248, 113, 113, 0.5); color: var(--danger); }
+.job-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.job-btn {
+    flex: 1 1 auto; min-width: 84px;
+    padding: 7px 10px; font-size: 0.72em; font-weight: 600;
+    font-family: var(--font);
+    border-radius: var(--radius-sm); border: 1px solid var(--border);
+    background: transparent; color: var(--text);
+    cursor: pointer; text-align: center; text-decoration: none;
+    transition: all 0.18s ease;
+}
+.job-btn:hover:not(:disabled) { border-color: rgba(139, 92, 246, 0.65); }
+.job-btn:disabled { opacity: 0.5; cursor: default; }
+.job-btn.primary { background: var(--grad); color: #fff; border-color: transparent; }
+
 .tracking-section {
     padding: 18px;
     background: var(--surface);

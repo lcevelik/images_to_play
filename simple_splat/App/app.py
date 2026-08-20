@@ -224,6 +224,25 @@ def _job_folder(job_id):
         return None
     return os.path.abspath(os.path.join(app.config['PROCESSING_FOLDER'], str(job_id)))
 
+def _spawn_recipe(job_dir, images_dir, quality, export_fbx=False):
+    """Launch pipeline/recipes.py as a DETACHED process; return its pid.
+
+    The child writes status/output into job_dir and runs independently of Flask, so a
+    server restart or crash never orphans the job. Shared by /upload (fresh job) and
+    /promote (an existing job re-run at a higher quality)."""
+    recipes_py = os.path.join(_APP_DIR, 'pipeline', 'recipes.py')
+    flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == 'nt' else 0
+    cmd = [sys.executable, recipes_py, quality, images_dir, job_dir]
+    if export_fbx:
+        cmd.append('--fbx')
+    # Close the parent's copy of the log handle after spawning — the child holds its
+    # own; keeping ours open leaks one handle per recipe job.
+    with open(os.path.join(job_dir, 'recipe_spawn.log'), 'w') as spawn_log:
+        proc = subprocess.Popen(cmd, stdout=spawn_log, stderr=subprocess.STDOUT,
+                                creationflags=flags, close_fds=True)
+    return proc.pid
+
+
 def _load_job_status(job_id):
     """Load a job's status from JSON file (for recovery after restart)."""
     try:
@@ -1000,24 +1019,17 @@ def process_images_async(job_id, image_path, preset='medium', matcher_type='exha
                 # Spawn the recipe as a DETACHED process that writes status/output to the
                 # job dir. It runs independently of the Flask server, so a server restart
                 # or crash never orphans the job (status is read back from recipe_status.json).
-                _recipes_py = os.path.join(_APP_DIR, 'pipeline', 'recipes.py')
                 _job_dir = os.path.dirname(image_path)
-                _flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == 'nt' else 0
-                _cmd = [sys.executable, _recipes_py, _quality, image_path, _job_dir]
-                if (advanced_settings or {}).get('export_fbx'):
-                    _cmd.append('--fbx')
-                # Close the parent's copy of the log handle after spawning — the child
-                # holds its own; keeping ours open leaks one handle per recipe job.
-                with open(os.path.join(_job_dir, 'recipe_spawn.log'), 'w') as _spawn_log:
-                    _proc = subprocess.Popen(_cmd, stdout=_spawn_log, stderr=subprocess.STDOUT,
-                                             creationflags=_flags, close_fds=True)
+                _pid = _spawn_recipe(_job_dir, image_path, _quality,
+                                     export_fbx=(advanced_settings or {}).get('export_fbx'))
                 add_log(f"[RECIPE] {_quality.upper()} pipeline launched (detached — survives server restarts)", "INFO")
                 processing_status[job_id]['step'] = f'{_quality.title()} pipeline starting...'
                 processing_status[job_id]['status'] = 'processing'
                 processing_status[job_id]['is_recipe'] = True
+                processing_status[job_id]['quality'] = _quality
                 # Record the PID so /kill can stop the detached tree. Without it a
                 # cancelled recipe keeps running (and holding the GPU) invisibly.
-                processing_status[job_id]['recipe_pid'] = _proc.pid
+                processing_status[job_id]['recipe_pid'] = _pid
                 _save_job_status(job_id)
                 return
             except Exception as _re:
@@ -2059,6 +2071,229 @@ def upload_files():
         'method': method
     })
 
+def _resolve_job_status(job_id, job_folder):
+    """Read-only best-known state of a job, merging both sources of truth.
+
+    A detached recipe records its progress in recipe_status.json; the job_status JSON is
+    only refreshed in memory by /status, so on its own it reports a finished draft as
+    still 'processing'. Deliberately free of /status's side effects (log ingestion,
+    stage-timer transitions) so listing jobs never mutates them."""
+    saved = processing_status.get(job_id) or _load_job_status(job_id) or {}
+    info = {
+        'status': saved.get('status'),
+        'step': saved.get('step'),
+        'progress': saved.get('progress', 0),
+        'started_at': saved.get('started_at'),
+        'quality': saved.get('quality') or (saved.get('config') or {}).get('quality'),
+        'preset': saved.get('preset'),
+        'error': saved.get('error'),
+    }
+    try:
+        with open(os.path.join(job_folder, 'recipe_status.json')) as f:
+            rs = json.load(f)
+        info.update({k: rs[k] for k in ('status', 'step', 'progress') if rs.get(k) is not None})
+    except (OSError, ValueError):
+        pass
+    return info
+
+
+def _job_can_promote(job_folder, info):
+    """Whether a job can be re-run at production quality without redoing SfM."""
+    scene0 = os.path.join(job_folder, 'scene', 'sparse', '0')
+    return bool(info.get('status') == 'completed'
+                and info.get('quality') != 'production'
+                and all(os.path.exists(os.path.join(scene0, f))
+                        for f in ('cameras.bin', 'images.bin', 'points3D.bin')))
+
+
+@app.route('/jobs')
+def list_jobs():
+    """Every job on disk, newest first — the UI's way back to a job after a reload.
+
+    Without this the browser only ever knows the job it just uploaded (there is no
+    client-side persistence), so refreshing the page stranded finished jobs with no way
+    to reopen or promote them."""
+    jobs = []
+    root = app.config['PROCESSING_FOLDER']
+    for name in os.listdir(root) if os.path.isdir(root) else []:
+        folder = os.path.join(root, name)
+        if not os.path.isdir(folder) or _job_folder(name) is None:
+            continue
+        info = _resolve_job_status(name, folder)
+        result = _pick_result_ply(folder)
+        images_dir = next((os.path.join(folder, d) for d in ('images', 'source')
+                           if os.path.isdir(os.path.join(folder, d))), None)
+        try:
+            n_images = sum(1 for f in os.listdir(images_dir) if allowed_file(f)) if images_dir else 0
+        except OSError:
+            n_images = 0
+        try:
+            created = info.get('started_at') or os.path.getctime(folder)
+        except OSError:
+            created = 0
+        jobs.append({
+            'job_id': name,
+            'created': created,
+            'status': info.get('status') or ('completed' if result else 'unknown'),
+            'step': info.get('step'),
+            'progress': info.get('progress', 0),
+            'quality': info.get('quality'),
+            'preset': info.get('preset'),
+            'images': n_images,
+            'has_result': bool(result),
+            'result_mb': round(os.path.getsize(result) / (1024 * 1024), 1) if result else None,
+            'has_draft': os.path.exists(os.path.join(folder, 'draft.ply')),
+            'has_thumb': bool(images_dir),
+            'can_promote': _job_can_promote(folder, info),
+        })
+    jobs.sort(key=lambda j: j['created'], reverse=True)
+    return jsonify({'jobs': jobs})
+
+
+@app.route('/jobs/<job_id>/thumb.jpg')
+def job_thumb(job_id):
+    """Small cached thumbnail of a job's first image, so the Jobs list is recognisable
+    at a glance rather than a wall of UUIDs."""
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
+    thumb = os.path.join(job_folder, 'thumb.jpg')
+    if not os.path.exists(thumb):
+        src_dir = next((os.path.join(job_folder, d) for d in ('images', 'source')
+                        if os.path.isdir(os.path.join(job_folder, d))), None)
+        if not src_dir:
+            return jsonify({'error': 'No images'}), 404
+        try:
+            first = sorted(f for f in os.listdir(src_dir) if allowed_file(f))[0]
+        except (OSError, IndexError):
+            return jsonify({'error': 'No images'}), 404
+        try:
+            from PIL import Image
+            with Image.open(os.path.join(src_dir, first)) as im:
+                im = im.convert('RGB')
+                im.thumbnail((320, 320))
+                im.save(thumb, 'JPEG', quality=80)
+        except Exception:
+            # Pillow missing or the image is unreadable — serve the original rather
+            # than failing the whole card.
+            return send_file(os.path.abspath(os.path.join(src_dir, first)))
+    return send_file(os.path.abspath(thumb), mimetype='image/jpeg')
+
+
+@app.route('/promote/<job_id>', methods=['POST'])
+def promote_to_production(job_id):
+    """Re-run a finished draft at production quality, reusing its reconstruction.
+
+    Draft and production share the same learned-SfM -> undistort front end, and
+    run_production() already resumes from an existing job_dir/scene (_existing_scene),
+    so promoting skips that ~12 min and goes straight to MCMC + Brush + combine. The
+    draft PLY is preserved as draft.ply; gaussian_splat.ply keeps serving the draft
+    until production's final compress step replaces it."""
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
+    if not os.path.isdir(job_folder):
+        return jsonify({'error': 'Job not found'}), 404
+
+    # The reconstruction must actually be on disk — without it run_production would
+    # silently redo the entire SfM front end rather than reuse anything.
+    scene0 = os.path.join(job_folder, 'scene', 'sparse', '0')
+    if not all(os.path.exists(os.path.join(scene0, f))
+               for f in ('cameras.bin', 'images.bin', 'points3D.bin')):
+        return jsonify({'error': 'This job has no reusable reconstruction (scene/sparse/0 is '
+                                 'missing) — it has to be re-run from the images.'}), 400
+
+    cur = processing_status.get(job_id) or _load_job_status(job_id) or {}
+    # Resolve against recipe_status.json too: the saved job JSON still records a finished
+    # draft as 'processing', and trusting it would reject every promotable job.
+    if _resolve_job_status(job_id, job_folder).get('status') == 'processing':
+        return jsonify({'error': 'This job is still running.'}), 409
+    # Exclude this job from the concurrency count: its own stale 'processing' entry
+    # would otherwise count against the limit it is being checked against.
+    active = sum(1 for jid, st in processing_status.items()
+                 if jid != job_id and st.get('status') == 'processing'
+                 and st.get('method') != 'mlsharp')
+    if active >= MAX_CONCURRENT_JOBS:
+        return jsonify({'error': f'Too many jobs running (limit: {MAX_CONCURRENT_JOBS}). '
+                                 'Wait for the running job to finish.'}), 429
+
+    # Preserve the draft. Production writes the same gaussian_splat.ply, but only at its
+    # final compress step, so this copy both keeps the draft viewable for the whole run
+    # and leaves a permanent draft.ply afterwards. Never overwrite an existing draft.ply:
+    # promoting a second time would clobber the original draft with a production result.
+    result_ply = os.path.join(job_folder, 'gaussian_splat.ply')
+    draft_ply = os.path.join(job_folder, 'draft.ply')
+    if os.path.exists(result_ply) and not os.path.exists(draft_ply):
+        try:
+            shutil.copy2(result_ply, draft_ply)
+            add_log("[PROMOTE] draft preserved as draft.ply", "INFO")
+        except Exception as e:
+            return jsonify({'error': f'Could not preserve the draft PLY: {e}'}), 500
+
+    images_dir = os.path.join(job_folder, 'images')
+    if not os.path.isdir(images_dir):
+        images_dir = os.path.join(job_folder, 'source')
+
+    # Overwrite the draft's terminal recipe_status.json BEFORE spawning. /status overlays
+    # that file, so leaving 'completed' in it would make the UI announce the production
+    # run as finished the instant it starts.
+    try:
+        with open(os.path.join(job_folder, 'recipe_status.json'), 'w') as _f:
+            json.dump({'step': 'Production pipeline starting...', 'progress': 0,
+                       'stage': None, 'status': 'processing'}, _f)
+    except Exception as e:
+        return jsonify({'error': f'Could not reset job status: {e}'}), 500
+
+    try:
+        pid = _spawn_recipe(job_folder, images_dir, 'production',
+                            export_fbx=bool((cur.get('config') or {}).get('export_fbx')))
+    except Exception as e:
+        add_log(f"[PROMOTE] launch failed: {e}", "ERROR")
+        return jsonify({'error': f'Failed to launch production: {e}'}), 500
+
+    # Carry the draft's SfM stage timings forward — that work is being reused, not redone
+    # — and reset only training, the half production actually re-runs.
+    old_stages = cur.get('stages') or {}
+    stages = {}
+    for _name in ('feature_extraction', 'feature_matching', 'mapping', 'dense_mvs', 'training'):
+        _old = old_stages.get(_name) or {}
+        if _name == 'training' or _old.get('status') not in ('complete', 'running'):
+            stages[_name] = {'status': 'pending', 'started_at': None, 'elapsed': None}
+        else:
+            # started_at must be dropped with the status pinned to complete, or the live
+            # elapsed loop in /status would keep ticking a stage that already finished.
+            stages[_name] = {'status': 'complete', 'started_at': None, 'elapsed': _old.get('elapsed')}
+
+    job_start_times[job_id] = time.time()
+    processing_status[job_id] = {
+        'status': 'processing',
+        'step': 'Production pipeline starting...',
+        'stage': None,
+        'progress': 0,
+        'eta_seconds': None,
+        # the draft already wrote alignment.json, so the 3D preview is there immediately
+        'preview_ready': os.path.exists(os.path.join(job_folder, 'alignment.json')),
+        'error': None,
+        'logs': deque(maxlen=200),
+        'preset': cur.get('preset'),
+        'config': dict(cur.get('config') or {}, quality='production'),
+        'started_at': time.time(),
+        'is_recipe': True,
+        'quality': 'production',
+        'promoted_from_draft': True,
+        'has_draft': os.path.exists(draft_ply),
+        'fbx': cur.get('fbx', False),
+        'recipe_pid': pid,
+        # keep the byte offset so /logs doesn't re-ingest the whole draft transcript
+        '_recipe_log_off': cur.get('_recipe_log_off', 0),
+        'stages': stages,
+    }
+    _save_job_status(job_id)
+    add_log(f"[PROMOTE] PRODUCTION relaunched on job {job_id[:8]} — reusing the existing "
+            f"reconstruction (skipping learned-SfM + undistort)", "INFO")
+    return jsonify({'job_id': job_id, 'message': 'Production run started, reusing the draft reconstruction.'})
+
+
 @app.route('/status/<job_id>')
 def get_status(job_id):
     """Get processing status (checks memory first, then disk for recovery)"""
@@ -2138,6 +2373,15 @@ def get_status(job_id):
     if 'logs' in status:
         status['logs'] = list(status['logs'])  # Convert deque to list
 
+    # Whether this job can be re-run at production quality WITHOUT redoing SfM. Decided
+    # here rather than in the browser because it depends on what's on disk: a finished
+    # run, a reusable reconstruction, and a result that isn't already production.
+    status['has_draft'] = os.path.exists(os.path.join(job_folder, 'draft.ply'))
+    status['can_promote'] = _job_can_promote(job_folder, {
+        'status': status.get('status'),
+        'quality': status.get('quality') or (status.get('config') or {}).get('quality'),
+    })
+
     return jsonify(status)
 
 def _pick_result_ply(folder):
@@ -2150,6 +2394,22 @@ def _pick_result_ply(folder):
             return p
     ply_files = list(Path(folder).rglob('*.ply'))
     return str(ply_files[0]) if ply_files else None
+
+
+@app.route('/ply/<job_id>/draft.ply')
+def serve_draft_ply(job_id):
+    """Serve the draft PLY preserved by /promote.
+
+    Deliberately does NOT gate on job status the way serve_ply does: draft.ply is a
+    finished artifact, so it stays viewable while a production re-run occupies the same
+    job for the next couple of hours — and afterwards, for an A/B against the result."""
+    job_folder = _job_folder(job_id)
+    if job_folder is None:
+        return jsonify({'error': 'Invalid job id'}), 400
+    draft = os.path.join(job_folder, 'draft.ply')
+    if not os.path.exists(draft):
+        return jsonify({'error': 'No draft PLY for this job'}), 404
+    return send_file(os.path.abspath(draft), mimetype='application/octet-stream')
 
 
 @app.route('/ply/<job_id>.ply')

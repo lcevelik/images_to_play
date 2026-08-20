@@ -29,6 +29,7 @@
                 <button class="tab-btn" id="tabBtn-results" onclick="switchTab('results')" role="tab">
                     Results <span class="tab-dot" id="resultsTabDot"></span>
                 </button>
+                <button class="tab-btn" id="tabBtn-jobs" onclick="switchTab('jobs'); loadJobs()" role="tab">Jobs</button>
             </div>
 
             <div class="header-actions">
@@ -359,6 +360,21 @@
                 </div>
             </section>
 
+            <!-- ════ JOBS TAB ════ -->
+            <section class="tab-view" id="tab-jobs">
+                <div class="jobs-wrap">
+                    <div class="jobs-head">
+                        <div>
+                            <div class="section-label">Existing Jobs</div>
+                            <div class="jobs-sub">Pick a job to reopen its result, or send a draft to production.</div>
+                        </div>
+                        <button class="small-btn" onclick="loadJobs()">↻ Refresh</button>
+                    </div>
+                    <div class="jobs-grid" id="jobsGrid"></div>
+                    <div class="jobs-empty" id="jobsEmpty">Loading jobs…</div>
+                </div>
+            </section>
+
             <!-- ════ RESULTS TAB ════ -->
             <section class="tab-view" id="tab-results">
                 <div class="results-wrap">
@@ -382,6 +398,16 @@
                                     <a href="#" class="result-btn" id="fbxBtn" style="display:none; margin-top:8px;" download>
                                         ⬇ Download FBX Camera
                                     </a>
+                                    <a href="#" class="result-btn" id="viewDraftBtn" style="display:none; margin-top:8px;" target="_blank">
+                                        View Draft (before production)
+                                    </a>
+                                    <button class="result-btn" id="promoteBtn" style="display:none; margin-top:8px;" onclick="sendToProduction()">
+                                        ⬆ Send to Production
+                                    </button>
+                                    <div class="promote-note" id="promoteNote" style="display:none;">
+                                        Reuses this job's camera solve — skips straight to MCMC + Brush (~2.5 hr).
+                                        Your draft is kept.
+                                    </div>
                                 </div>
                             </div>
 
